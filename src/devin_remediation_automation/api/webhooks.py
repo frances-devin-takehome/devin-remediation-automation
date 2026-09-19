@@ -35,7 +35,7 @@ async def receive_github_webhook(
 
     try:
         payload: Any = json.loads(body)
-    except json.JSONDecodeError as exc:
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Malformed JSON payload") from exc
     if not isinstance(payload, dict):
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Malformed JSON payload")
