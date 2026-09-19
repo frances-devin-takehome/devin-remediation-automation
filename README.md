@@ -7,6 +7,14 @@ the Devin API. This repository currently contains only the service skeleton.
 
 - Python 3.12
 
+## Configuration
+
+Configuration is read from the process environment (see `.env.example` for the full list):
+
+| Variable | Required | Description |
+| --- | --- | --- |
+| `GITHUB_WEBHOOK_SECRET` | yes | Shared secret configured on the GitHub webhook, used to verify the `X-Hub-Signature-256` header. |
+
 ## Local development
 
 Create a virtual environment and install the project with development dependencies:
@@ -20,6 +28,7 @@ pip install -e ".[dev]"
 Run the service:
 
 ```bash
+export GITHUB_WEBHOOK_SECRET=replace-me
 uvicorn devin_remediation_automation.main:app --reload --port 8000
 ```
 
@@ -31,6 +40,14 @@ curl http://localhost:8000/health
 ```
 
 Interactive API docs are available at http://localhost:8000/docs.
+
+## Endpoints
+
+- `GET /health` — liveness check.
+- `POST /webhooks/github` — GitHub webhook receiver. Signature-verified; an `issues` event with
+  action `labeled` and label exactly `devin-remediation` is logged as remediation-eligible
+  (`{"status": "accepted"}`). Other valid events return `{"status": "ignored"}`, and an invalid or
+  missing signature returns `401`.
 
 ## Tests
 
@@ -49,6 +66,9 @@ ruff check .
 ```
 src/devin_remediation_automation/
     main.py          # FastAPI app factory
+    config.py        # environment-backed settings
+    security.py      # GitHub webhook signature verification
     api/health.py    # GET /health
+    api/webhooks.py  # POST /webhooks/github
 tests/
 ```
