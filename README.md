@@ -9,7 +9,7 @@ the Devin API. This repository currently contains only the service skeleton.
 
 ## Configuration
 
-Copy `.env.example` to `.env` and fill it in. Environment variables:
+Configuration is read from the process environment (see `.env.example` for the full list):
 
 | Variable | Required | Description |
 | --- | --- | --- |
