@@ -49,6 +49,27 @@ Interactive API docs are available at http://localhost:8000/docs.
   (`{"status": "accepted"}`). Other valid events return `{"status": "ignored"}`, and an invalid or
   missing signature returns `401`.
 
+## Docker
+
+Build the image:
+
+```bash
+docker build -t devin-remediation-automation .
+```
+
+Run it, supplying the webhook secret at runtime (no secrets are baked into the image):
+
+```bash
+docker run --rm -p 8000:8000 -e GITHUB_WEBHOOK_SECRET=replace-me devin-remediation-automation
+```
+
+Check the health endpoint:
+
+```bash
+curl http://localhost:8000/health
+# {"status":"healthy"}
+```
+
 ## Tests
 
 ```bash
