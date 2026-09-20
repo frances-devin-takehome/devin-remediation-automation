@@ -30,7 +30,7 @@ were remediated by Devin through this pipeline. All PRs are intentionally left o
 | Issue | Category | PR | Outcome |
 | --- | --- | --- | --- |
 | [#1 xlrd constraint/lock mismatch](https://github.com/frances-devin-takehome/superset/issues/1) | Dependency lock drift | [PR #2](https://github.com/frances-devin-takehome/superset/pull/2) | Root cause found (`xlrd` bound lived only in an extra that is not a compile input); one-line constraint added to `requirements/base.in`, lock regenerated, `xlrd 2.0.1 → 2.0.2` only. Predates PR correlation and CI tracking, so no `Remediation-ID`/validation status was recorded. |
-| [#4 Ruff findings](https://github.com/frances-devin-takehome/superset/issues/4) | Code quality | [PR #5](https://github.com/frances-devin-takehome/superset/pull/5) | 39 findings under newer Ruff brought to zero across three Ruff versions with behavior-preserving edits; false positives suppressed with reasoning; formatter drift explicitly left out. Predates correlation/CI tracking; the current `Remediation validation` workflow does not yet cover this category. |
+| [#4 Ruff findings](https://github.com/frances-devin-takehome/superset/issues/4) | Code quality | [PR #5](https://github.com/frances-devin-takehome/superset/pull/5) | 39 `ruff check` findings under newer Ruff reduced to zero across the three tested Ruff versions (0.9.7, 0.12.0, 0.16.8) with behavior-preserving edits; formatter drift left out; `pre-commit` and the `superset-extensions-cli` test suite passed. Predates correlation/CI tracking; the current `Remediation validation` workflow does not yet cover this category. |
 | [#6 vulnerable python-multipart pin](https://github.com/frances-devin-takehome/superset/issues/6) | Security dependency | [PR #7](https://github.com/frances-devin-takehome/superset/pull/7) | Transitive pin (via `mcp`/`fastmcp-slim`) bumped `0.0.29 → 0.0.32`, fixing four advisories (CVE-2026-53537..53540); scoped `--upgrade-package` recompile, one line changed. Carries `Remediation-ID`; [`Remediation validation` passed](https://github.com/frances-devin-takehome/superset/actions/runs/35534835834), and the service recorded the job as `succeeded` (see the example under Observability). |
 
 Only the third issue exercised the complete lifecycle end to end; the first two were dispatched by earlier
@@ -220,10 +220,7 @@ ruff check .
 There is no local webhook-simulation helper yet. The test suite (`tests/test_github_webhook.py`,
 `tests/test_pull_request_correlation.py`, `tests/test_ci_tracking.py`) drives the endpoint with
 signed synthetic `issues`, `pull_request`, and `workflow_run` payloads against a mocked Devin API,
-and is currently the fastest way to see each stage exercised.
-
-> TODO: a small script that signs and POSTs the three payload types at a running instance (with
-> Devin dispatch stubbed) would be a useful evaluator convenience.
+and is currently the recommended local evaluation path.
 
 ## Running a real E2E remediation
 
@@ -265,7 +262,8 @@ and is currently the fastest way to see each stage exercised.
   the label is the audit trail of that decision, and it keeps the blast radius to opted-in issues.
 - **Devin for ambiguous remediation.** "Smallest safe fix" requires reading the repo, choosing
   among options (constraint vs. extra, pin vs. upgrade), running repo tooling, and explaining the
-  choice. The three PRs above show exactly that reasoning; none of it is scriptable.
+  choice. The three PRs above required repository-specific investigation and judgment that a
+  fixed remediation script would not reliably capture.
 - **Deterministic CI validates the agent.** The agent's claims are inputs to review, not proof.
   The repository's own recompile check decides `succeeded`, so a plausible-but-wrong PR fails
   loudly.
