@@ -217,10 +217,47 @@ ruff check .
 
 ## Simulating / evaluating locally
 
-There is no local webhook-simulation helper yet. The test suite (`tests/test_github_webhook.py`,
-`tests/test_pull_request_correlation.py`, `tests/test_ci_tracking.py`) drives the endpoint with
-signed synthetic `issues`, `pull_request`, and `workflow_run` payloads against a mocked Devin API,
-and is currently the recommended local evaluation path.
+`scripts/simulate_webhook.py` (stdlib only) signs and POSTs synthetic `issues`, `pull_request`,
+and `workflow_run` payloads — the same shapes the test suite uses — to a running instance. It
+never talks to the Devin API itself; only the service does, using whatever credentials it was
+started with.
+
+Start the service with a known webhook secret (any values work for `DEVIN_*` if you only want to
+exercise the pipeline; the `issues` step then returns `502` and records a retryable `failed` job,
+which the later steps still correlate against):
+
+```bash
+docker run --rm -p 8000:8000 \
+  -e GITHUB_WEBHOOK_SECRET=local-dev-secret \
+  -e DEVIN_API_KEY=replace-me \
+  -e DEVIN_ORG_ID=replace-me \
+  -v devin-remediation-data:/data \
+  devin-remediation-automation
+```
+
+Then, in another shell, walk one remediation through the lifecycle:
+
+```bash
+export GITHUB_WEBHOOK_SECRET=local-dev-secret
+
+python scripts/simulate_webhook.py issues                          # claim + dispatch (job sim-delivery-1)
+python scripts/simulate_webhook.py pull_request                    # PR #7 with Remediation-ID: sim-delivery-1 → pr_created
+python scripts/simulate_webhook.py workflow_run --status in_progress   # → ci_running
+python scripts/simulate_webhook.py workflow_run                    # completed/success → succeeded
+python scripts/simulate_webhook.py workflow_run --conclusion failure   # rerun policy: latest completed run wins → failed
+
+curl -s http://localhost:8000/remediations/sim-delivery-1
+curl -s http://localhost:8000/remediations/metrics
+```
+
+Each command prints the HTTP status and JSON response. Re-running `issues` demonstrates
+idempotency (`duplicate` / re-claim of a `failed` job); `--remediation-id` and `--pr-number` start
+a second, independent job; `--base-url` targets a non-local instance; `--help` lists the rest.
+With real `DEVIN_*` credentials the `issues` step creates a real Devin session.
+
+The test suite (`tests/test_github_webhook.py`, `tests/test_pull_request_correlation.py`,
+`tests/test_ci_tracking.py`) covers the same three events against a mocked Devin API and remains
+the reference for expected behavior.
 
 ## Running a real E2E remediation
 
@@ -308,4 +345,5 @@ src/devin_remediation_automation/
     api/remediations.py     # GET /remediations, /remediations/{id}, /remediations/metrics
     api/health.py           # GET /health
 tests/                      # pytest; Devin API mocked
+scripts/simulate_webhook.py # signed synthetic webhook sender for local evaluation
 ```
