@@ -139,7 +139,7 @@ A real successful remediation (`GET /remediations/{delivery_id}` for issue #6 / 
 ```
 
 Timestamps the service writes itself (`created_at`, `updated_at`, `dispatched_at`) are SQLite
-`CURRENT_TIMESTAMP` strings; `pr_created_at` and `ci_completed_at` are copied verbatim from the
+`datetime('now')` strings (UTC); `pr_created_at` and `ci_completed_at` are copied verbatim from the
 GitHub payloads, hence the ISO-8601 format.
 
 Metrics shape:
