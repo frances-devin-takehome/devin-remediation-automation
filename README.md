@@ -106,13 +106,13 @@ as "handed to Devin" and "Devin produced a pull request".
 
 ```json
 {
-  "total": 3,
+  "total": 4,
   "counts_by_status": {"in_progress": 1, "dispatched": 1, "pr_created": 1, "failed": 1},
   "active": 1,
   "dispatched": 1,
   "pr_created": 1,
   "failed": 1,
-  "dispatch_attempts": 4,
+  "dispatch_attempts": 5,
   "last_dispatched_at": "2026-09-19 13:40:02",
   "oldest_in_progress_at": "2026-09-19 13:41:55"
 }
