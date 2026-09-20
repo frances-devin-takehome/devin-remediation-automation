@@ -242,9 +242,8 @@ def test_ci_outcomes_are_visible_in_metrics(client: TestClient) -> None:
 
     metrics = client.get("/remediations/metrics").json()
 
-    assert metrics["succeeded"] == 1
-    assert metrics["pr_created"] == 0
     assert metrics["counts_by_status"]["succeeded"] == 1
+    assert metrics["counts_by_status"]["pr_created"] == 0
     assert client.get("/remediations", params={"status": "succeeded"}).json()["count"] == 1
 
 

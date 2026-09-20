@@ -81,8 +81,8 @@ def test_correlation_is_visible_in_metrics_and_listing(client: TestClient) -> No
     metrics = client.get("/remediations/metrics").json()
     listed = client.get("/remediations", params={"status": "pr_created"}).json()
 
-    assert metrics["pr_created"] == 1
-    assert metrics["dispatched"] == 0
+    assert metrics["counts_by_status"]["pr_created"] == 1
+    assert metrics["counts_by_status"]["dispatched"] == 0
     assert listed["count"] == 1
     assert listed["jobs"][0]["pr_number"] == 7
 
