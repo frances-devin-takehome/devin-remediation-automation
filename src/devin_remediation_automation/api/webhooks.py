@@ -11,6 +11,8 @@ from devin_remediation_automation.dependencies import get_devin_client, get_reme
 from devin_remediation_automation.devin_client import DevinAPIError, DevinClient
 from devin_remediation_automation.remediation import (
     REMEDIATION_LABEL,
+    SUCCESS_CONCLUSION,
+    VALIDATION_WORKFLOW_NAME,
     RemediationRequest,
     build_session_prompt,
     build_session_title,
@@ -69,7 +71,7 @@ async def receive_github_webhook(
     if not verify_signature(settings.github_webhook_secret, body, x_hub_signature_256):
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid webhook signature")
 
-    if x_github_event not in ("issues", "pull_request"):
+    if x_github_event not in ("issues", "pull_request", "workflow_run"):
         return WebhookResponse(status="ignored")
 
     try:
@@ -81,6 +83,9 @@ async def receive_github_webhook(
 
     if x_github_event == "pull_request":
         return await _handle_pull_request(payload, settings, remediation_store)
+
+    if x_github_event == "workflow_run":
+        return await _handle_workflow_run(payload, settings, remediation_store)
 
     return await _handle_issue(
         payload, x_github_delivery, settings, devin_client, remediation_store
@@ -142,6 +147,90 @@ async def _handle_pull_request(
         devin_session_id=job.devin_session_id,
         devin_session_url=job.devin_session_url,
     )
+
+
+async def _handle_workflow_run(
+    payload: dict[str, Any],
+    settings: Settings,
+    remediation_store: RemediationStore,
+) -> WebhookResponse:
+    repository = payload.get("repository")
+    workflow_run = payload.get("workflow_run")
+    if not isinstance(repository, dict) or not isinstance(workflow_run, dict):
+        return WebhookResponse(status="ignored")
+
+    if (
+        repository.get("full_name") != settings.allowed_repository
+        or workflow_run.get("name") != VALIDATION_WORKFLOW_NAME
+    ):
+        return WebhookResponse(status="ignored")
+
+    pr_number = _workflow_pull_request_number(workflow_run)
+    run_id = workflow_run.get("id")
+    run_url = workflow_run.get("html_url")
+    if pr_number is None or not isinstance(run_id, int) or not isinstance(run_url, str):
+        return WebhookResponse(status="ignored")
+
+    completed = workflow_run.get("status") == "completed"
+    conclusion = workflow_run.get("conclusion")
+    conclusion = conclusion if isinstance(conclusion, str) else None
+    if not completed:
+        job_status = RemediationStatus.CI_RUNNING
+        conclusion = None
+        completed_at = None
+    else:
+        job_status = (
+            RemediationStatus.SUCCEEDED
+            if conclusion == SUCCESS_CONCLUSION
+            else RemediationStatus.FAILED
+        )
+        updated_at = workflow_run.get("updated_at")
+        completed_at = updated_at if isinstance(updated_at, str) else None
+
+    job = await run_in_threadpool(
+        remediation_store.record_workflow_run,
+        pr_number,
+        run_id=run_id,
+        run_url=run_url,
+        status=job_status,
+        conclusion=conclusion,
+        completed_at=completed_at,
+    )
+    if job is None:
+        logger.info(
+            "Ignoring validation workflow run for an unknown pull request: pr_number=%s run=%s",
+            pr_number,
+            run_url,
+        )
+        return WebhookResponse(status="ignored")
+
+    logger.info(
+        "Recorded validation workflow run: remediation_id=%s pr_number=%s run_id=%s "
+        "conclusion=%s status=%s",
+        job.delivery_id,
+        pr_number,
+        run_id,
+        job.ci_conclusion,
+        job.status.value,
+    )
+    return WebhookResponse(
+        status=job.status.value,
+        remediation_id=job.delivery_id,
+        pr_number=job.pr_number,
+        devin_session_id=job.devin_session_id,
+        devin_session_url=job.devin_session_url,
+    )
+
+
+def _workflow_pull_request_number(workflow_run: dict[str, Any]) -> int | None:
+    pull_requests = workflow_run.get("pull_requests")
+    if not isinstance(pull_requests, list):
+        return None
+    for pull_request in pull_requests:
+        number = pull_request.get("number") if isinstance(pull_request, dict) else None
+        if isinstance(number, int):
+            return number
+    return None
 
 
 async def _handle_issue(

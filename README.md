@@ -58,15 +58,16 @@ Interactive API docs are available at http://localhost:8000/docs.
 - `POST /webhooks/github` — GitHub webhook receiver. Other valid events return
   `{"status": "ignored"}`; an invalid or missing signature returns `401`.
 - `GET /remediations` — read-only list of remediation jobs, newest first. Supports
-  `?status=in_progress|dispatched|pr_created|failed`, `?limit=` (1–200, default 50) and
-  `?offset=`.
+  `?status=in_progress|dispatched|pr_created|ci_running|succeeded|failed`, `?limit=` (1–200,
+  default 50) and `?offset=`.
 - `GET /remediations/metrics` — aggregate counts and operational timestamps.
 - `GET /remediations/{delivery_id}` — a single job, or `404` if the delivery is unknown.
 
 ## Event → Devin session flow
 
 1. GitHub delivers an `issues` event; the `X-Hub-Signature-256` header is verified against
-   `GITHUB_WEBHOOK_SECRET` (as it is for every event, including `pull_request`).
+   `GITHUB_WEBHOOK_SECRET` (as it is for every event, including `pull_request` and
+   `workflow_run`).
 2. The event is eligible only when `action` is `labeled`, the added label is exactly
    `devin-remediation`, and the repository full name equals `ALLOWED_REPOSITORY`. Anything else is
    ignored without calling Devin.
@@ -84,7 +85,8 @@ Interactive API docs are available at http://localhost:8000/docs.
 6. If session creation fails, the endpoint returns `502` and the event is not reported as
    dispatched.
 7. When Devin opens the pull request, the resulting `pull_request` event correlates it back to
-   the job and moves it to `pr_created`.
+   the job and moves it to `pr_created`; the `Remediation validation` workflow then decides
+   whether the job ends up `succeeded` or `failed` (see CI outcome tracking below).
 
 Tests use a mocked Devin API and never create real sessions.
 
@@ -93,26 +95,41 @@ Tests use a mocked Devin API and never create real sessions.
 Each eligible delivery is persisted as a remediation job in the `remediation_jobs` SQLite table:
 GitHub delivery id (primary key), repository, issue number/title/URL, status, Devin session
 id/URL once created, dispatch attempt count, last failure message, pull request number/URL/
-creation time once correlated, and `created_at` / `updated_at` / `dispatched_at` timestamps.
+creation time once correlated, validation workflow run id/URL/conclusion/completion time, and
+`created_at` / `updated_at` / `dispatched_at` timestamps.
 
-Statuses are `in_progress` (a dispatch attempt is running), `dispatched` (a Devin session was
-created), `pr_created` (Devin opened a pull request for the job) and `failed` (the Devin API
-call failed; the delivery stays retryable).
-**Neither `dispatched` nor `pr_created` is a successful remediation** — the service does not
-track the session outcome or the pull request's review/CI state, so operators should read them
-as "handed to Devin" and "Devin produced a pull request".
+Statuses:
+
+| status | meaning |
+| --- | --- |
+| `in_progress` | a dispatch attempt is running |
+| `dispatched` | a Devin session was created |
+| `pr_created` | Devin opened a pull request for the job |
+| `ci_running` | the `Remediation validation` workflow is running for that pull request |
+| `succeeded` | the validation workflow completed successfully |
+| `failed` | the Devin API call failed (retryable), or validation completed with a failure-like conclusion |
+
+Only `succeeded` means the remediation was independently validated; `dispatched` and
+`pr_created` just mean "handed to Devin" and "Devin produced a pull request". A `failed` job is
+only retried by a redelivery when it never reached Devin — a validation failure is terminal and
+is never re-dispatched.
 
 `GET /remediations/metrics` returns:
 
 ```json
 {
-  "total": 4,
-  "counts_by_status": {"in_progress": 1, "dispatched": 1, "pr_created": 1, "failed": 1},
+  "total": 6,
+  "counts_by_status": {
+    "in_progress": 1, "dispatched": 1, "pr_created": 1,
+    "ci_running": 1, "succeeded": 1, "failed": 1
+  },
   "active": 1,
   "dispatched": 1,
   "pr_created": 1,
+  "ci_running": 1,
+  "succeeded": 1,
   "failed": 1,
-  "dispatch_attempts": 5,
+  "dispatch_attempts": 7,
   "last_dispatched_at": "2026-09-19 13:40:02",
   "oldest_in_progress_at": "2026-09-19 13:41:55"
 }
@@ -136,9 +153,28 @@ in the pull request body. The webhook also accepts `pull_request` events:
   a job, and a redelivery is a no-op. A job keeps the first pull request it was correlated with;
   a later, different one returns `{"status": "duplicate"}` and leaves the record untouched.
 
+## CI outcome tracking
+
+The fork runs a GitHub Actions workflow named `Remediation validation` on remediation pull
+requests, and the service listens for its `workflow_run` events:
+
+- Only runs from `ALLOWED_REPOSITORY` whose `workflow_run.name` is `Remediation validation` are
+  considered; other workflows are ignored.
+- The run is correlated by the pull request number in `workflow_run.pull_requests`, matched
+  against the `pr_number` recorded during PR correlation. A run with no pull request, or one
+  belonging to no remediation, is ignored with `200`.
+- A run that is not yet `completed` moves the job to `ci_running`; a completed run moves it to
+  `succeeded` when the conclusion is `success` and `failed` for any other conclusion
+  (`failure`, `timed_out`, `startup_failure`, `cancelled`, ...), which is also recorded verbatim
+  in `ci_conclusion`.
+- Each event stores `ci_run_id`, `ci_run_url`, `ci_conclusion` and `ci_completed_at`.
+- Like PR correlation, this is an update of an existing job, so a `workflow_run` event never
+  creates one and redeliveries are no-ops. A finished job is never dragged back to `ci_running`
+  by a late in-progress event.
+
 ### Upgrading existing remediation databases
 
-The `pr_number`, `pr_url` and `pr_created_at` columns are added on startup with
+The `pr_*` and `ci_*` columns are added on startup with
 `ALTER TABLE ... ADD COLUMN` when missing, so an existing `remediation_jobs` database keeps
 working and its rows simply have no pull request recorded yet.
 

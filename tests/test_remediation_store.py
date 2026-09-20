@@ -142,9 +142,22 @@ def test_store_status_round_trip(tmp_path: Path, status: RemediationStatus) -> N
     store.claim("delivery-1", REQUEST)
     if status is RemediationStatus.DISPATCHED:
         store.mark_dispatched("delivery-1", "devin-1", "https://app.devin.ai/sessions/1")
-    elif status is RemediationStatus.PR_CREATED:
+    elif status in (
+        RemediationStatus.PR_CREATED,
+        RemediationStatus.CI_RUNNING,
+        RemediationStatus.SUCCEEDED,
+    ):
         store.mark_dispatched("delivery-1", "devin-1", "https://app.devin.ai/sessions/1")
         store.record_pull_request("delivery-1", 7, "https://github.com/o/r/pull/7", None)
+        if status is not RemediationStatus.PR_CREATED:
+            store.record_workflow_run(
+                7,
+                run_id=555,
+                run_url="https://github.com/o/r/actions/runs/555",
+                status=status,
+                conclusion="success" if status is RemediationStatus.SUCCEEDED else None,
+                completed_at=None,
+            )
     elif status is RemediationStatus.FAILED:
         store.mark_failed("delivery-1", "boom")
 

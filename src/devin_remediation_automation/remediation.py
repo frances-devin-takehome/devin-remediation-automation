@@ -3,6 +3,8 @@ from dataclasses import dataclass
 
 REMEDIATION_LABEL = "devin-remediation"
 REMEDIATION_MARKER = "Remediation-ID"
+VALIDATION_WORKFLOW_NAME = "Remediation validation"
+SUCCESS_CONCLUSION = "success"
 MARKER_PATTERN = re.compile(rf"^\s*{REMEDIATION_MARKER}:\s*(\S+)\s*$", re.IGNORECASE | re.MULTILINE)
 
 

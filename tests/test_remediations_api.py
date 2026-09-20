@@ -94,6 +94,8 @@ def test_metrics_aggregate_by_status(tmp_path: Path) -> None:
         "in_progress": 0,
         "dispatched": 1,
         "pr_created": 0,
+        "ci_running": 0,
+        "succeeded": 0,
         "failed": 1,
     }
     assert metrics["active"] == 0
@@ -116,6 +118,8 @@ def test_metrics_are_empty_without_jobs(tmp_path: Path) -> None:
         "in_progress": 0,
         "dispatched": 0,
         "pr_created": 0,
+        "ci_running": 0,
+        "succeeded": 0,
         "failed": 0,
     }
     assert metrics["dispatch_attempts"] == 0
