@@ -24,6 +24,20 @@ CREATE TABLE IF NOT EXISTS remediation_jobs (
 )
 """
 
+# Deliveries recorded by the idempotency-only schema carry no issue metadata, so they are
+# imported with placeholders; their status and session keep redeliveries from re-dispatching.
+UNKNOWN_REPOSITORY = "unknown"
+MIGRATE_LEGACY_DELIVERIES = f"""
+INSERT OR IGNORE INTO remediation_jobs (
+    delivery_id, repository, issue_number, issue_title, issue_url, status,
+    devin_session_id, devin_session_url, created_at, updated_at, dispatched_at
+)
+SELECT delivery_id, '{UNKNOWN_REPOSITORY}', 0, '', '', status,
+       devin_session_id, devin_session_url, created_at, updated_at,
+       CASE WHEN status = 'dispatched' THEN updated_at END
+FROM deliveries
+"""
+
 
 class RemediationStatus(str, Enum):
     """Lifecycle of a remediation job.
@@ -104,6 +118,15 @@ class RemediationStore:
         with closing(self._connect()) as connection:
             connection.execute("PRAGMA journal_mode=WAL")
             connection.execute(SCHEMA)
+            self._migrate_legacy_deliveries(connection)
+
+    @staticmethod
+    def _migrate_legacy_deliveries(connection: sqlite3.Connection) -> None:
+        legacy_exists = connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'deliveries'"
+        ).fetchone()
+        if legacy_exists:
+            connection.execute(MIGRATE_LEGACY_DELIVERIES)
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self._database_path, timeout=30, isolation_level=None)

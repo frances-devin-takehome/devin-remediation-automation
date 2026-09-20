@@ -113,6 +113,16 @@ outcome or the resulting pull request, so operators should read it as "handed to
 `dispatch_attempts` counts Devin dispatch attempts including retries, and
 `oldest_in_progress_at` surfaces work that is stuck mid-dispatch.
 
+### Upgrading from the idempotency-only schema
+
+On startup the store imports any rows from the previous `deliveries` table into
+`remediation_jobs` (`INSERT OR IGNORE`, so it is safe to re-run and never overwrites newer
+state), preserving delivery id, status, Devin session id/URL and timestamps. Already-dispatched
+deliveries therefore stay non-reclaimable across the upgrade, and previously failed ones stay
+retryable. Imported rows have no issue metadata in the old schema, so they get `repository`
+`unknown`, issue number `0` and empty title/URL. The `deliveries` table is left in place,
+unused, rather than dropped.
+
 ## Idempotency
 
 Eligible deliveries are recorded in a SQLite table keyed by the `X-GitHub-Delivery` header, so a

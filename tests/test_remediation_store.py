@@ -172,6 +172,76 @@ def test_retry_increments_attempts_and_clears_error(tmp_path: Path) -> None:
     assert retried.dispatched_at is not None
 
 
+LEGACY_SCHEMA = """
+CREATE TABLE deliveries (
+    delivery_id TEXT PRIMARY KEY,
+    status TEXT NOT NULL,
+    devin_session_id TEXT,
+    devin_session_url TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+)
+"""
+
+
+def write_legacy_database(database_path: Path) -> None:
+    with sqlite3.connect(database_path) as connection:
+        connection.execute(LEGACY_SCHEMA)
+        connection.executemany(
+            "INSERT INTO deliveries (delivery_id, status, devin_session_id, devin_session_url) "
+            "VALUES (?, ?, ?, ?)",
+            [
+                ("old-dispatched", "dispatched", "devin-old", "https://app.devin.ai/sessions/old"),
+                ("old-failed", "failed", None, None),
+            ],
+        )
+
+
+def test_legacy_dispatched_delivery_cannot_be_reclaimed(tmp_path: Path) -> None:
+    database_path = tmp_path / "deliveries.db"
+    write_legacy_database(database_path)
+
+    store = RemediationStore(database_path)
+    claim = store.claim("old-dispatched", REQUEST)
+
+    assert not claim.acquired
+    assert claim.job.status is RemediationStatus.DISPATCHED
+    assert claim.job.devin_session_id == "devin-old"
+    assert claim.job.devin_session_url == "https://app.devin.ai/sessions/old"
+    assert claim.job.repository == "unknown"
+    # Re-initializing (another restart) must not resurrect or duplicate the imported row.
+    reopened = RemediationStore(database_path)
+    assert not reopened.claim("old-dispatched", REQUEST).acquired
+    assert [job.delivery_id for job in reopened.list_jobs()].count("old-dispatched") == 1
+
+
+def test_legacy_failed_delivery_stays_retryable(tmp_path: Path) -> None:
+    database_path = tmp_path / "deliveries.db"
+    write_legacy_database(database_path)
+
+    store = RemediationStore(database_path)
+    claim = store.claim("old-failed", REQUEST)
+
+    assert claim.acquired
+    assert claim.job.status is RemediationStatus.IN_PROGRESS
+
+
+def test_legacy_redelivery_over_http_is_not_redispatched(tmp_path: Path) -> None:
+    database_path = tmp_path / "deliveries.db"
+    write_legacy_database(database_path)
+    devin_client = FakeDevinClient()
+
+    with TestClient(build_app(devin_client, str(database_path))) as client:
+        response = post(client, delivery_id="old-dispatched")
+
+    assert response.json() == {
+        "status": "duplicate",
+        "devin_session_id": "devin-old",
+        "devin_session_url": "https://app.devin.ai/sessions/old",
+    }
+    assert devin_client.calls == []
+
+
 def test_claim_records_issue_metadata(tmp_path: Path) -> None:
     store = RemediationStore(tmp_path / "deliveries.db")
 
