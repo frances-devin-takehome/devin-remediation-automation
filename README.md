@@ -217,43 +217,40 @@ ruff check .
 
 ## Simulating / evaluating locally
 
-`scripts/simulate_webhook.py` (stdlib only) signs and POSTs synthetic `issues`, `pull_request`,
-and `workflow_run` payloads — the same shapes the test suite uses — to a running instance. It
-never talks to the Devin API itself; only the service does, using whatever credentials it was
-started with.
+`scripts/simulate_webhook.py` (stdlib only) sends signed synthetic GitHub webhook payloads —
+`issues`, `pull_request`, and `workflow_run`, the same shapes the test suite uses — to the local
+service. The script itself does not contact GitHub or the Devin API; only the running service
+calls Devin, so the `issues` step creates a real Devin session.
 
-Start the service with a known webhook secret (any values work for `DEVIN_*` if you only want to
-exercise the pipeline; the `issues` step then returns `502` and records a retryable `failed` job,
-which the later steps still correlate against):
+Start the service with a webhook secret and valid Devin credentials:
 
 ```bash
 docker run --rm -p 8000:8000 \
   -e GITHUB_WEBHOOK_SECRET=local-dev-secret \
-  -e DEVIN_API_KEY=replace-me \
-  -e DEVIN_ORG_ID=replace-me \
+  -e DEVIN_API_KEY=<devin-api-key> \
+  -e DEVIN_ORG_ID=<devin-org-id> \
   -v devin-remediation-data:/data \
   devin-remediation-automation
 ```
 
-Then, in another shell, walk one remediation through the lifecycle:
+Then, in another shell, walk one remediation through the normal lifecycle
+(`dispatched → pr_created → ci_running → succeeded`):
 
 ```bash
 export GITHUB_WEBHOOK_SECRET=local-dev-secret
 
-python scripts/simulate_webhook.py issues                          # claim + dispatch (job sim-delivery-1)
-python scripts/simulate_webhook.py pull_request                    # PR #7 with Remediation-ID: sim-delivery-1 → pr_created
-python scripts/simulate_webhook.py workflow_run --status in_progress   # → ci_running
-python scripts/simulate_webhook.py workflow_run                    # completed/success → succeeded
-python scripts/simulate_webhook.py workflow_run --conclusion failure   # rerun policy: latest completed run wins → failed
+python3 scripts/simulate_webhook.py issues                             # → dispatched (job sim-delivery-1)
+python3 scripts/simulate_webhook.py pull_request                       # PR #7 with Remediation-ID: sim-delivery-1 → pr_created
+python3 scripts/simulate_webhook.py workflow_run --status in_progress  # → ci_running
+python3 scripts/simulate_webhook.py workflow_run                       # completed/success → succeeded
 
 curl -s http://localhost:8000/remediations/sim-delivery-1
 curl -s http://localhost:8000/remediations/metrics
 ```
 
-Each command prints the HTTP status and JSON response. Re-running `issues` demonstrates
-idempotency (`duplicate` / re-claim of a `failed` job); `--remediation-id` and `--pr-number` start
-a second, independent job; `--base-url` targets a non-local instance; `--help` lists the rest.
-With real `DEVIN_*` credentials the `issues` step creates a real Devin session.
+Each command prints the HTTP status and JSON response. Re-running `issues` with the same delivery
+id returns `duplicate` without a second session; `--remediation-id` and `--pr-number` start a
+second, independent job; `--base-url` targets a non-local instance; `--help` lists the rest.
 
 The test suite (`tests/test_github_webhook.py`, `tests/test_pull_request_correlation.py`,
 `tests/test_ci_tracking.py`) covers the same three events against a mocked Devin API and remains
