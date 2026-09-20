@@ -23,7 +23,11 @@ CREATE TABLE IF NOT EXISTS remediation_jobs (
     dispatched_at TEXT,
     pr_number INTEGER,
     pr_url TEXT,
-    pr_created_at TEXT
+    pr_created_at TEXT,
+    ci_run_id INTEGER,
+    ci_run_url TEXT,
+    ci_conclusion TEXT,
+    ci_completed_at TEXT
 )
 """
 
@@ -32,6 +36,10 @@ ADDED_COLUMNS = {
     "pr_number": "INTEGER",
     "pr_url": "TEXT",
     "pr_created_at": "TEXT",
+    "ci_run_id": "INTEGER",
+    "ci_run_url": "TEXT",
+    "ci_conclusion": "TEXT",
+    "ci_completed_at": "TEXT",
 }
 
 # Deliveries recorded by the idempotency-only schema carry no issue metadata, so they are
@@ -52,14 +60,21 @@ FROM deliveries
 class RemediationStatus(str, Enum):
     """Lifecycle of a remediation job.
 
-    `DISPATCHED` only means a Devin session was created; the remediation outcome is unknown
-    until session/PR tracking exists.
+    `DISPATCHED` only means a Devin session was created and `PR_CREATED` only that Devin
+    opened a pull request; the remediation is judged by the `Remediation validation`
+    workflow, which drives `CI_RUNNING` and then `SUCCEEDED` or `FAILED`.
     """
 
     IN_PROGRESS = "in_progress"
     DISPATCHED = "dispatched"
     PR_CREATED = "pr_created"
+    CI_RUNNING = "ci_running"
+    SUCCEEDED = "succeeded"
     FAILED = "failed"
+
+
+# Terminal states are never moved backwards by a late or duplicate workflow event.
+TERMINAL_STATUSES = (RemediationStatus.SUCCEEDED, RemediationStatus.FAILED)
 
 
 @dataclass(frozen=True)
@@ -80,6 +95,10 @@ class RemediationJob:
     pr_number: int | None = None
     pr_url: str | None = None
     pr_created_at: str | None = None
+    ci_run_id: int | None = None
+    ci_run_url: str | None = None
+    ci_conclusion: str | None = None
+    ci_completed_at: str | None = None
 
 
 @dataclass(frozen=True)
@@ -117,6 +136,10 @@ def _job(row: sqlite3.Row) -> RemediationJob:
         pr_number=row["pr_number"],
         pr_url=row["pr_url"],
         pr_created_at=row["pr_created_at"],
+        ci_run_id=row["ci_run_id"],
+        ci_run_url=row["ci_run_url"],
+        ci_conclusion=row["ci_conclusion"],
+        ci_completed_at=row["ci_completed_at"],
     )
 
 
@@ -181,10 +204,12 @@ class RemediationStore:
             except sqlite3.IntegrityError:
                 pass
 
-            # A previously failed dispatch stays retryable; anything else is already handled.
+            # A dispatch that never reached Devin stays retryable; anything else, including a
+            # job failed by its validation workflow, is already handled.
             cursor = connection.execute(
                 "UPDATE remediation_jobs SET status = ?, attempts = attempts + 1, "
-                "updated_at = datetime('now') WHERE delivery_id = ? AND status = ?",
+                "updated_at = datetime('now') WHERE delivery_id = ? AND status = ? "
+                "AND devin_session_id IS NULL",
                 (
                     RemediationStatus.IN_PROGRESS.value,
                     delivery_id,
@@ -234,6 +259,46 @@ class RemediationStore:
             )
             row = connection.execute(
                 "SELECT * FROM remediation_jobs WHERE delivery_id = ?", (delivery_id,)
+            ).fetchone()
+            return _job(row) if row is not None else None
+
+    def record_workflow_run(
+        self,
+        pr_number: int,
+        *,
+        run_id: int,
+        run_url: str,
+        status: RemediationStatus,
+        conclusion: str | None,
+        completed_at: str | None,
+    ) -> RemediationJob | None:
+        """Record a validation workflow run against the job holding that pull request.
+
+        Returns the job, or None when no remediation owns the pull request. Only an existing
+        job is updated, so repeated workflow events are no-ops. The latest completed run
+        decides the outcome, including a rerun that reverses an earlier one, while a job that
+        already completed is never moved back to `CI_RUNNING`.
+        """
+        with closing(self._connect()) as connection:
+            query = (
+                "UPDATE remediation_jobs SET status = ?, ci_run_id = ?, ci_run_url = ?, "
+                "ci_conclusion = ?, ci_completed_at = ?, updated_at = datetime('now') "
+                "WHERE pr_number = ?"
+            )
+            parameters: list[object] = [
+                status.value,
+                run_id,
+                run_url,
+                conclusion,
+                completed_at,
+                pr_number,
+            ]
+            if status is RemediationStatus.CI_RUNNING:
+                query += " AND status NOT IN (?, ?)"
+                parameters += [state.value for state in TERMINAL_STATUSES]
+            connection.execute(query, parameters)
+            row = connection.execute(
+                "SELECT * FROM remediation_jobs WHERE pr_number = ?", (pr_number,)
             ).fetchone()
             return _job(row) if row is not None else None
 

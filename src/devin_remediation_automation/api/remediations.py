@@ -31,6 +31,10 @@ class RemediationJobResponse(BaseModel):
     pr_number: int | None = None
     pr_url: str | None = None
     pr_created_at: str | None = None
+    ci_run_id: int | None = None
+    ci_run_url: str | None = None
+    ci_conclusion: str | None = None
+    ci_completed_at: str | None = None
 
     @classmethod
     def of(cls, job: RemediationJob) -> "RemediationJobResponse":
@@ -45,8 +49,8 @@ class RemediationListResponse(BaseModel):
 class RemediationMetricsResponse(BaseModel):
     """Aggregate view of remediation work.
 
-    `dispatched` counts jobs whose Devin session was created; it is not a count of successful
-    remediations, which the service cannot determine yet.
+    `dispatched` counts jobs whose Devin session was created and `pr_created` those with a
+    correlated pull request; only `succeeded` means the validation workflow passed.
     """
 
     total: int
@@ -54,6 +58,8 @@ class RemediationMetricsResponse(BaseModel):
     active: int
     dispatched: int
     pr_created: int
+    ci_running: int
+    succeeded: int
     failed: int
     dispatch_attempts: int
     last_dispatched_at: str | None = None
@@ -85,6 +91,8 @@ async def get_remediation_metrics(
         active=counts[RemediationStatus.IN_PROGRESS.value],
         dispatched=counts[RemediationStatus.DISPATCHED.value],
         pr_created=counts[RemediationStatus.PR_CREATED.value],
+        ci_running=counts[RemediationStatus.CI_RUNNING.value],
+        succeeded=counts[RemediationStatus.SUCCEEDED.value],
         failed=counts[RemediationStatus.FAILED.value],
         dispatch_attempts=summary.dispatch_attempts,
         last_dispatched_at=summary.last_dispatched_at,

@@ -95,6 +95,31 @@ def pull_request_payload(
     }
 
 
+def workflow_run_payload(
+    *,
+    status: str = "completed",
+    conclusion: str | None = "success",
+    pr_number: int | None = 7,
+    run_id: int = 555,
+    name: str = "Remediation validation",
+    repository: str = ALLOWED_REPOSITORY,
+) -> dict[str, Any]:
+    pull_requests = [] if pr_number is None else [{"number": pr_number}]
+    return {
+        "action": "completed" if status == "completed" else "in_progress",
+        "repository": {"full_name": repository},
+        "workflow_run": {
+            "id": run_id,
+            "name": name,
+            "status": status,
+            "conclusion": conclusion if status == "completed" else None,
+            "html_url": f"https://github.com/{repository}/actions/runs/{run_id}",
+            "updated_at": "2026-09-19T12:30:00Z",
+            "pull_requests": pull_requests,
+        },
+    }
+
+
 def labeled_payload(
     label: str = "devin-remediation",
     action: str = "labeled",
