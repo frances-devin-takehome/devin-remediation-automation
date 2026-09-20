@@ -16,14 +16,19 @@ FROM python:3.12-slim AS runtime
 
 ENV PATH="/opt/venv/bin:$PATH" \
     PYTHONUNBUFFERED=1 \
-    PYTHONDONTWRITEBYTECODE=1
+    PYTHONDONTWRITEBYTECODE=1 \
+    DELIVERY_DB_PATH=/data/deliveries.db
 
-RUN useradd --create-home --uid 10001 app
+RUN useradd --create-home --uid 10001 app \
+    && mkdir -p /data && chown app:app /data
 
 COPY --from=builder /opt/venv /opt/venv
 
 USER app
 WORKDIR /app
+
+# Mount a volume here so delivery idempotency survives container restarts.
+VOLUME ["/data"]
 
 EXPOSE 8000
 

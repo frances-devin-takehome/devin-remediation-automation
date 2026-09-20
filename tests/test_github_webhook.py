@@ -1,40 +1,22 @@
-import hashlib
-import hmac
 import json
 import logging
 from collections.abc import Iterator
+from pathlib import Path
 from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
 
-from devin_remediation_automation.config import Settings, get_settings
 from devin_remediation_automation.dependencies import get_devin_client
-from devin_remediation_automation.devin_client import DevinAPIError, DevinSession
-from devin_remediation_automation.main import create_app
-
-SECRET = "test-secret"
-ALLOWED_REPOSITORY = "frances-devin-takehome/superset"
-
-
-class FakeDevinClient:
-    """Stand-in for DevinClient; records calls instead of reaching the Devin API."""
-
-    def __init__(self, error: Exception | None = None) -> None:
-        self.error = error
-        self.calls: list[dict[str, Any]] = []
-
-    async def create_session(
-        self,
-        prompt: str,
-        *,
-        title: str | None = None,
-        tags: list[str] | None = None,
-    ) -> DevinSession:
-        self.calls.append({"prompt": prompt, "title": title, "tags": tags})
-        if self.error is not None:
-            raise self.error
-        return DevinSession(session_id="devin-abc123", url="https://app.devin.ai/sessions/abc123")
+from devin_remediation_automation.devin_client import DevinAPIError
+from helpers import (
+    ALLOWED_REPOSITORY,
+    SECRET,
+    FakeDevinClient,
+    build_app,
+    labeled_payload,
+    signed_request,
+)
 
 
 @pytest.fixture
@@ -43,50 +25,22 @@ def devin_client() -> FakeDevinClient:
 
 
 @pytest.fixture
-def client(devin_client: FakeDevinClient) -> Iterator[TestClient]:
-    app = create_app()
-    app.dependency_overrides[get_settings] = lambda: Settings(
-        github_webhook_secret=SECRET,
-        devin_api_key="cog_test_key",
-        devin_org_id="org-test",
-        allowed_repository=ALLOWED_REPOSITORY,
-    )
-    app.dependency_overrides[get_devin_client] = lambda: devin_client
+def client(devin_client: FakeDevinClient, tmp_path: Path) -> Iterator[TestClient]:
+    app = build_app(devin_client, str(tmp_path / "deliveries.db"))
     with TestClient(app) as test_client:
         yield test_client
     app.dependency_overrides.clear()
 
 
-def post(client: TestClient, payload: dict[str, Any], event: str = "issues", secret: str = SECRET):
-    body = json.dumps(payload).encode()
-    signature = hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
-    return client.post(
-        "/webhooks/github",
-        content=body,
-        headers={
-            "X-GitHub-Event": event,
-            "X-Hub-Signature-256": f"sha256={signature}",
-            "Content-Type": "application/json",
-        },
-    )
-
-
-def labeled_payload(
-    label: str = "devin-remediation",
-    action: str = "labeled",
-    repository: str = ALLOWED_REPOSITORY,
-) -> dict[str, Any]:
-    return {
-        "action": action,
-        "label": {"name": label},
-        "repository": {"full_name": repository},
-        "issue": {
-            "number": 42,
-            "title": "Flaky login test",
-            "html_url": f"https://github.com/{repository}/issues/42",
-            "body": "Login test fails intermittently.\n\nAcceptance: test passes 20 runs in a row.",
-        },
-    }
+def post(
+    client: TestClient,
+    payload: dict[str, Any],
+    event: str = "issues",
+    secret: str = SECRET,
+    delivery_id: str | None = "delivery-1",
+):
+    body, headers = signed_request(payload, event=event, secret=secret, delivery_id=delivery_id)
+    return client.post("/webhooks/github", content=body, headers=headers)
 
 
 def test_eligible_event_creates_devin_session(
@@ -98,8 +52,8 @@ def test_eligible_event_creates_devin_session(
     assert response.status_code == 200
     assert response.json() == {
         "status": "dispatched",
-        "devin_session_id": "devin-abc123",
-        "devin_session_url": "https://app.devin.ai/sessions/abc123",
+        "devin_session_id": "devin-abc1",
+        "devin_session_url": "https://app.devin.ai/sessions/abc1",
     }
 
     assert len(devin_client.calls) == 1
@@ -112,8 +66,8 @@ def test_eligible_event_creates_devin_session(
     assert "pull request" in prompt
 
     logged = caplog.text
-    assert "devin-abc123" in logged
-    assert "https://app.devin.ai/sessions/abc123" in logged
+    assert "devin-abc1" in logged
+    assert "https://app.devin.ai/sessions/abc1" in logged
     assert "cog_test_key" not in logged
 
 
@@ -127,10 +81,18 @@ def test_other_repository_does_not_dispatch(
     assert devin_client.calls == []
 
 
+def test_missing_delivery_header_is_rejected(
+    client: TestClient, devin_client: FakeDevinClient
+) -> None:
+    response = post(client, labeled_payload(), delivery_id=None)
+
+    assert response.status_code == 400
+    assert devin_client.calls == []
+
+
 def test_devin_api_failure_is_not_reported_as_dispatched(client: TestClient) -> None:
-    app = client.app
     failing = FakeDevinClient(error=DevinAPIError("boom"))
-    app.dependency_overrides[get_devin_client] = lambda: failing
+    client.app.dependency_overrides[get_devin_client] = lambda: failing
 
     response = post(client, labeled_payload())
 
@@ -180,7 +142,7 @@ def test_missing_signature_is_rejected(client: TestClient, devin_client: FakeDev
     response = client.post(
         "/webhooks/github",
         content=json.dumps(labeled_payload()).encode(),
-        headers={"X-GitHub-Event": "issues"},
+        headers={"X-GitHub-Event": "issues", "X-GitHub-Delivery": "delivery-1"},
     )
 
     assert response.status_code == 401
