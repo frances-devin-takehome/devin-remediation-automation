@@ -169,8 +169,18 @@ requests, and the service listens for its `workflow_run` events:
   in `ci_conclusion`.
 - Each event stores `ci_run_id`, `ci_run_url`, `ci_conclusion` and `ci_completed_at`.
 - Like PR correlation, this is an update of an existing job, so a `workflow_run` event never
-  creates one and redeliveries are no-ops. A finished job is never dragged back to `ci_running`
-  by a late in-progress event.
+  creates one and redeliveries are no-ops.
+
+### Rerun policy
+
+The latest *completed* run wins: a completed event always overwrites the job's status and
+`ci_*` metadata, so a failed run followed by a successful rerun ends `succeeded`, and a later
+failed run moves a previously successful job back to `failed`. Because a redelivered completed
+event rewrites the same values, redeliveries are still no-ops.
+
+Only the `ci_running` transition is guarded (`AND status NOT IN ('succeeded', 'failed')`), so a
+queued or in-progress event — including the start of a rerun — never regresses a completed
+result; the job keeps the previous outcome until that rerun completes.
 
 ### Upgrading existing remediation databases
 

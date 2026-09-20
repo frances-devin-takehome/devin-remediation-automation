@@ -140,6 +140,50 @@ def test_redelivered_workflow_events_are_idempotent(client: TestClient) -> None:
     assert client.get("/remediations").json()["count"] == 1
 
 
+def test_successful_rerun_replaces_an_earlier_failure(client: TestClient) -> None:
+    correlated_job(client)
+    post(client, workflow_run_payload(conclusion="failure"), event="workflow_run")
+
+    rerun = post(client, workflow_run_payload(run_id=556), event="workflow_run")
+
+    assert rerun.json()["status"] == "succeeded"
+    recorded = job(client)
+    assert recorded["status"] == "succeeded"
+    assert recorded["ci_run_id"] == 556
+    assert recorded["ci_conclusion"] == "success"
+
+
+def test_failed_rerun_replaces_an_earlier_success(client: TestClient) -> None:
+    correlated_job(client)
+    post(client, workflow_run_payload(), event="workflow_run")
+
+    rerun = post(
+        client, workflow_run_payload(run_id=556, conclusion="failure"), event="workflow_run"
+    )
+
+    assert rerun.json()["status"] == "failed"
+    recorded = job(client)
+    assert recorded["status"] == "failed"
+    assert recorded["ci_run_id"] == 556
+    assert recorded["ci_conclusion"] == "failure"
+
+
+def test_rerun_in_progress_event_never_regresses_a_completed_result(client: TestClient) -> None:
+    correlated_job(client)
+    post(client, workflow_run_payload(), event="workflow_run")
+
+    queued_rerun = post(
+        client, workflow_run_payload(run_id=556, status="in_progress"), event="workflow_run"
+    )
+
+    assert queued_rerun.json()["status"] == "succeeded"
+    recorded = job(client)
+    assert recorded["status"] == "succeeded"
+    assert recorded["ci_run_id"] == 555
+    assert recorded["ci_conclusion"] == "success"
+    assert recorded["ci_completed_at"] == "2026-09-19T12:30:00Z"
+
+
 def test_unrelated_workflow_is_ignored(client: TestClient) -> None:
     correlated_job(client)
 

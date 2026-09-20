@@ -275,8 +275,9 @@ class RemediationStore:
         """Record a validation workflow run against the job holding that pull request.
 
         Returns the job, or None when no remediation owns the pull request. Only an existing
-        job is updated, and a terminal job is never moved back to `CI_RUNNING`, so repeated or
-        out-of-order workflow events are no-ops.
+        job is updated, so repeated workflow events are no-ops. The latest completed run
+        decides the outcome, including a rerun that reverses an earlier one, while a job that
+        already completed is never moved back to `CI_RUNNING`.
         """
         with closing(self._connect()) as connection:
             query = (
