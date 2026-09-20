@@ -20,9 +20,19 @@ CREATE TABLE IF NOT EXISTS remediation_jobs (
     last_error TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at TEXT NOT NULL DEFAULT (datetime('now')),
-    dispatched_at TEXT
+    dispatched_at TEXT,
+    pr_number INTEGER,
+    pr_url TEXT,
+    pr_created_at TEXT
 )
 """
+
+# Columns added after the first release; existing databases are upgraded in place.
+ADDED_COLUMNS = {
+    "pr_number": "INTEGER",
+    "pr_url": "TEXT",
+    "pr_created_at": "TEXT",
+}
 
 # Deliveries recorded by the idempotency-only schema carry no issue metadata, so they are
 # imported with placeholders; their status and session keep redeliveries from re-dispatching.
@@ -48,6 +58,7 @@ class RemediationStatus(str, Enum):
 
     IN_PROGRESS = "in_progress"
     DISPATCHED = "dispatched"
+    PR_CREATED = "pr_created"
     FAILED = "failed"
 
 
@@ -66,6 +77,9 @@ class RemediationJob:
     devin_session_url: str | None = None
     last_error: str | None = None
     dispatched_at: str | None = None
+    pr_number: int | None = None
+    pr_url: str | None = None
+    pr_created_at: str | None = None
 
 
 @dataclass(frozen=True)
@@ -100,6 +114,9 @@ def _job(row: sqlite3.Row) -> RemediationJob:
         devin_session_url=row["devin_session_url"],
         last_error=row["last_error"],
         dispatched_at=row["dispatched_at"],
+        pr_number=row["pr_number"],
+        pr_url=row["pr_url"],
+        pr_created_at=row["pr_created_at"],
     )
 
 
@@ -118,7 +135,19 @@ class RemediationStore:
         with closing(self._connect()) as connection:
             connection.execute("PRAGMA journal_mode=WAL")
             connection.execute(SCHEMA)
+            self._add_missing_columns(connection)
             self._migrate_legacy_deliveries(connection)
+
+    @staticmethod
+    def _add_missing_columns(connection: sqlite3.Connection) -> None:
+        existing = {
+            row["name"] for row in connection.execute("PRAGMA table_info(remediation_jobs)")
+        }
+        for column, column_type in ADDED_COLUMNS.items():
+            if column not in existing:
+                connection.execute(
+                    f"ALTER TABLE remediation_jobs ADD COLUMN {column} {column_type}"
+                )
 
     @staticmethod
     def _migrate_legacy_deliveries(connection: sqlite3.Connection) -> None:
@@ -181,6 +210,32 @@ class RemediationStore:
                 "updated_at = datetime('now') WHERE delivery_id = ?",
                 (RemediationStatus.FAILED.value, error, delivery_id),
             )
+
+    def record_pull_request(
+        self, delivery_id: str, pr_number: int, pr_url: str, pr_created_at: str | None
+    ) -> RemediationJob | None:
+        """Correlate an opened pull request with its job; a redelivery is a no-op.
+
+        Returns the job (correlated or already correlated), or None when the delivery id is
+        unknown. Only an existing job is ever updated, so a pull-request event cannot create one.
+        """
+        with closing(self._connect()) as connection:
+            connection.execute(
+                "UPDATE remediation_jobs SET status = ?, pr_number = ?, pr_url = ?, "
+                "pr_created_at = ?, updated_at = datetime('now') "
+                "WHERE delivery_id = ? AND pr_number IS NULL",
+                (
+                    RemediationStatus.PR_CREATED.value,
+                    pr_number,
+                    pr_url,
+                    pr_created_at,
+                    delivery_id,
+                ),
+            )
+            row = connection.execute(
+                "SELECT * FROM remediation_jobs WHERE delivery_id = ?", (delivery_id,)
+            ).fetchone()
+            return _job(row) if row is not None else None
 
     def get(self, delivery_id: str) -> RemediationJob | None:
         with closing(self._connect()) as connection:

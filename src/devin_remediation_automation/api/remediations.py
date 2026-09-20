@@ -28,6 +28,9 @@ class RemediationJobResponse(BaseModel):
     devin_session_id: str | None = None
     devin_session_url: str | None = None
     last_error: str | None = None
+    pr_number: int | None = None
+    pr_url: str | None = None
+    pr_created_at: str | None = None
 
     @classmethod
     def of(cls, job: RemediationJob) -> "RemediationJobResponse":
@@ -50,6 +53,7 @@ class RemediationMetricsResponse(BaseModel):
     counts_by_status: dict[str, int]
     active: int
     dispatched: int
+    pr_created: int
     failed: int
     dispatch_attempts: int
     last_dispatched_at: str | None = None
@@ -80,6 +84,7 @@ async def get_remediation_metrics(
         counts_by_status=counts,
         active=counts[RemediationStatus.IN_PROGRESS.value],
         dispatched=counts[RemediationStatus.DISPATCHED.value],
+        pr_created=counts[RemediationStatus.PR_CREATED.value],
         failed=counts[RemediationStatus.FAILED.value],
         dispatch_attempts=summary.dispatch_attempts,
         last_dispatched_at=summary.last_dispatched_at,

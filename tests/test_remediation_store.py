@@ -44,11 +44,9 @@ def test_redelivery_does_not_create_a_second_session(tmp_path: Path) -> None:
         second = post(client)
 
     assert first.json()["status"] == "dispatched"
-    assert second.json() == {
-        "status": "duplicate",
-        "devin_session_id": first.json()["devin_session_id"],
-        "devin_session_url": first.json()["devin_session_url"],
-    }
+    assert second.json()["status"] == "duplicate"
+    assert second.json()["devin_session_id"] == first.json()["devin_session_id"]
+    assert second.json()["devin_session_url"] == first.json()["devin_session_url"]
     assert len(devin_client.calls) == 1
 
 
@@ -144,6 +142,9 @@ def test_store_status_round_trip(tmp_path: Path, status: RemediationStatus) -> N
     store.claim("delivery-1", REQUEST)
     if status is RemediationStatus.DISPATCHED:
         store.mark_dispatched("delivery-1", "devin-1", "https://app.devin.ai/sessions/1")
+    elif status is RemediationStatus.PR_CREATED:
+        store.mark_dispatched("delivery-1", "devin-1", "https://app.devin.ai/sessions/1")
+        store.record_pull_request("delivery-1", 7, "https://github.com/o/r/pull/7", None)
     elif status is RemediationStatus.FAILED:
         store.mark_failed("delivery-1", "boom")
 
@@ -234,11 +235,9 @@ def test_legacy_redelivery_over_http_is_not_redispatched(tmp_path: Path) -> None
     with TestClient(build_app(devin_client, str(database_path))) as client:
         response = post(client, delivery_id="old-dispatched")
 
-    assert response.json() == {
-        "status": "duplicate",
-        "devin_session_id": "devin-old",
-        "devin_session_url": "https://app.devin.ai/sessions/old",
-    }
+    assert response.json()["status"] == "duplicate"
+    assert response.json()["devin_session_id"] == "devin-old"
+    assert response.json()["devin_session_url"] == "https://app.devin.ai/sessions/old"
     assert devin_client.calls == []
 
 

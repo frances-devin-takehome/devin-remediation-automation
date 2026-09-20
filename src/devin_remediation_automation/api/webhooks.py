@@ -14,6 +14,7 @@ from devin_remediation_automation.remediation import (
     RemediationRequest,
     build_session_prompt,
     build_session_title,
+    extract_remediation_id,
 )
 from devin_remediation_automation.remediation_store import RemediationStatus, RemediationStore
 from devin_remediation_automation.security import verify_signature
@@ -27,6 +28,8 @@ class WebhookResponse(BaseModel):
     status: str
     devin_session_id: str | None = None
     devin_session_url: str | None = None
+    remediation_id: str | None = None
+    pr_number: int | None = None
 
 
 def _remediation_request(payload: dict[str, Any]) -> RemediationRequest | None:
@@ -66,7 +69,7 @@ async def receive_github_webhook(
     if not verify_signature(settings.github_webhook_secret, body, x_hub_signature_256):
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid webhook signature")
 
-    if x_github_event != "issues":
+    if x_github_event not in ("issues", "pull_request"):
         return WebhookResponse(status="ignored")
 
     try:
@@ -76,6 +79,78 @@ async def receive_github_webhook(
     if not isinstance(payload, dict):
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Malformed JSON payload")
 
+    if x_github_event == "pull_request":
+        return await _handle_pull_request(payload, settings, remediation_store)
+
+    return await _handle_issue(
+        payload, x_github_delivery, settings, devin_client, remediation_store
+    )
+
+
+async def _handle_pull_request(
+    payload: dict[str, Any],
+    settings: Settings,
+    remediation_store: RemediationStore,
+) -> WebhookResponse:
+    if payload.get("action") != "opened":
+        return WebhookResponse(status="ignored")
+
+    repository = payload.get("repository")
+    pull_request = payload.get("pull_request")
+    if not isinstance(repository, dict) or not isinstance(pull_request, dict):
+        return WebhookResponse(status="ignored")
+
+    if repository.get("full_name") != settings.allowed_repository:
+        return WebhookResponse(status="ignored")
+
+    remediation_id = extract_remediation_id(pull_request.get("body"))
+    number = pull_request.get("number")
+    url = pull_request.get("html_url")
+    if remediation_id is None or not isinstance(number, int) or not isinstance(url, str):
+        return WebhookResponse(status="ignored")
+
+    created_at = pull_request.get("created_at")
+    job = await run_in_threadpool(
+        remediation_store.record_pull_request,
+        remediation_id,
+        number,
+        url,
+        created_at if isinstance(created_at, str) else None,
+    )
+    if job is None:
+        logger.info(
+            "Ignoring pull request with unknown remediation marker: remediation_id=%s pr=%s",
+            remediation_id,
+            url,
+        )
+        return WebhookResponse(status="ignored")
+
+    # The job keeps its first pull request; a later, different one is reported as a duplicate.
+    superseded = job.pr_number != number
+    logger.info(
+        "Correlated pull request with remediation: remediation_id=%s pr_number=%s pr_url=%s "
+        "status=%s",
+        remediation_id,
+        job.pr_number,
+        job.pr_url,
+        job.status.value,
+    )
+    return WebhookResponse(
+        status="duplicate" if superseded else "pr_correlated",
+        remediation_id=job.delivery_id,
+        pr_number=job.pr_number,
+        devin_session_id=job.devin_session_id,
+        devin_session_url=job.devin_session_url,
+    )
+
+
+async def _handle_issue(
+    payload: dict[str, Any],
+    x_github_delivery: str | None,
+    settings: Settings,
+    devin_client: DevinClient,
+    remediation_store: RemediationStore,
+) -> WebhookResponse:
     if payload.get("action") != "labeled":
         return WebhookResponse(status="ignored")
 
@@ -129,7 +204,7 @@ async def receive_github_webhook(
 
     try:
         session = await devin_client.create_session(
-            build_session_prompt(remediation),
+            build_session_prompt(remediation, x_github_delivery),
             title=build_session_title(remediation),
             tags=["remediation", "github-issue"],
         )

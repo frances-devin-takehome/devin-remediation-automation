@@ -1,6 +1,17 @@
+import re
 from dataclasses import dataclass
 
 REMEDIATION_LABEL = "devin-remediation"
+REMEDIATION_MARKER = "Remediation-ID"
+MARKER_PATTERN = re.compile(rf"^\s*{REMEDIATION_MARKER}:\s*(\S+)\s*$", re.IGNORECASE | re.MULTILINE)
+
+
+def extract_remediation_id(pull_request_body: str | None) -> str | None:
+    """Read the `Remediation-ID: <delivery_id>` marker Devin is asked to put in the PR body."""
+    if not pull_request_body:
+        return None
+    match = MARKER_PATTERN.search(pull_request_body)
+    return match.group(1) if match else None
 
 
 @dataclass(frozen=True)
@@ -16,7 +27,7 @@ def build_session_title(request: RemediationRequest) -> str:
     return f"Remediate {request.repository_full_name}#{request.issue_number}: {request.issue_title}"
 
 
-def build_session_prompt(request: RemediationRequest) -> str:
+def build_session_prompt(request: RemediationRequest, delivery_id: str) -> str:
     body = request.issue_body.strip() or "(no issue body provided)"
     return "\n".join(
         [
@@ -40,6 +51,11 @@ def build_session_prompt(request: RemediationRequest) -> str:
                 f"4. Open a pull request against {request.repository_full_name} describing "
                 f"the fix, and link it back to issue #{request.issue_number}. Do not merge it."
             ),
+            (
+                "5. Include this exact line on its own line in the pull request description so "
+                "the automation can correlate the pull request with this remediation:"
+            ),
+            f"   {REMEDIATION_MARKER}: {delivery_id}",
             "",
             (
                 "Decide the implementation yourself based on what you find in the codebase. "

@@ -58,20 +58,23 @@ Interactive API docs are available at http://localhost:8000/docs.
 - `POST /webhooks/github` — GitHub webhook receiver. Other valid events return
   `{"status": "ignored"}`; an invalid or missing signature returns `401`.
 - `GET /remediations` — read-only list of remediation jobs, newest first. Supports
-  `?status=in_progress|dispatched|failed`, `?limit=` (1–200, default 50) and `?offset=`.
+  `?status=in_progress|dispatched|pr_created|failed`, `?limit=` (1–200, default 50) and
+  `?offset=`.
 - `GET /remediations/metrics` — aggregate counts and operational timestamps.
 - `GET /remediations/{delivery_id}` — a single job, or `404` if the delivery is unknown.
 
 ## Event → Devin session flow
 
 1. GitHub delivers an `issues` event; the `X-Hub-Signature-256` header is verified against
-   `GITHUB_WEBHOOK_SECRET`.
+   `GITHUB_WEBHOOK_SECRET` (as it is for every event, including `pull_request`).
 2. The event is eligible only when `action` is `labeled`, the added label is exactly
    `devin-remediation`, and the repository full name equals `ALLOWED_REPOSITORY`. Anything else is
    ignored without calling Devin.
 3. A task is built from the payload (repository full name, issue number, title, URL, and issue
    body/acceptance criteria) asking Devin to investigate, make the smallest appropriate fix, run
-   the relevant validation, and open a pull request. The fix itself is not prescribed.
+   the relevant validation, and open a pull request. The fix itself is not prescribed. The task
+   also asks Devin to put `Remediation-ID: <delivery_id>` in the pull request body (see Pull
+   request correlation below).
 4. The delivery is claimed in SQLite by its `X-GitHub-Delivery` id (see Idempotency below); an
    already-handled delivery returns without calling Devin.
 5. One session is created via the Devin v3 Organization API
@@ -80,6 +83,8 @@ Interactive API docs are available at http://localhost:8000/docs.
    repository, issue, and session identifiers are logged (never credentials).
 6. If session creation fails, the endpoint returns `502` and the event is not reported as
    dispatched.
+7. When Devin opens the pull request, the resulting `pull_request` event correlates it back to
+   the job and moves it to `pr_created`.
 
 Tests use a mocked Devin API and never create real sessions.
 
@@ -87,22 +92,25 @@ Tests use a mocked Devin API and never create real sessions.
 
 Each eligible delivery is persisted as a remediation job in the `remediation_jobs` SQLite table:
 GitHub delivery id (primary key), repository, issue number/title/URL, status, Devin session
-id/URL once created, dispatch attempt count, last failure message, and `created_at` /
-`updated_at` / `dispatched_at` timestamps.
+id/URL once created, dispatch attempt count, last failure message, pull request number/URL/
+creation time once correlated, and `created_at` / `updated_at` / `dispatched_at` timestamps.
 
 Statuses are `in_progress` (a dispatch attempt is running), `dispatched` (a Devin session was
-created) and `failed` (the Devin API call failed; the delivery stays retryable).
-**`dispatched` is not a successful remediation** — the service does not yet track the session
-outcome or the resulting pull request, so operators should read it as "handed to Devin".
+created), `pr_created` (Devin opened a pull request for the job) and `failed` (the Devin API
+call failed; the delivery stays retryable).
+**Neither `dispatched` nor `pr_created` is a successful remediation** — the service does not
+track the session outcome or the pull request's review/CI state, so operators should read them
+as "handed to Devin" and "Devin produced a pull request".
 
 `GET /remediations/metrics` returns:
 
 ```json
 {
   "total": 3,
-  "counts_by_status": {"in_progress": 1, "dispatched": 1, "failed": 1},
+  "counts_by_status": {"in_progress": 1, "dispatched": 1, "pr_created": 1, "failed": 1},
   "active": 1,
   "dispatched": 1,
+  "pr_created": 1,
   "failed": 1,
   "dispatch_attempts": 4,
   "last_dispatched_at": "2026-09-19 13:40:02",
@@ -112,6 +120,27 @@ outcome or the resulting pull request, so operators should read it as "handed to
 
 `dispatch_attempts` counts Devin dispatch attempts including retries, and
 `oldest_in_progress_at` surfaces work that is stuck mid-dispatch.
+
+## Pull request correlation
+
+The remediation prompt instructs Devin to include the marker line `Remediation-ID: <delivery_id>`
+in the pull request body. The webhook also accepts `pull_request` events:
+
+- Only `action: opened` from `ALLOWED_REPOSITORY` is considered; everything else is ignored.
+- The marker is read from the PR body and used to look up the job by delivery id. A PR with no
+  marker, or a marker naming an unknown delivery, is ignored with `200` rather than treated as an
+  error — plenty of pull requests are unrelated to remediation.
+- A match records the PR number, URL and creation time and moves the job to `pr_created`; the
+  response is `{"status": "pr_correlated", "remediation_id": ..., "pr_number": ...}`.
+- Correlation is a conditional update on an existing job, so a `pull_request` event never creates
+  a job, and a redelivery is a no-op. A job keeps the first pull request it was correlated with;
+  a later, different one returns `{"status": "duplicate"}` and leaves the record untouched.
+
+### Upgrading existing remediation databases
+
+The `pr_number`, `pr_url` and `pr_created_at` columns are added on startup with
+`ALTER TABLE ... ADD COLUMN` when missing, so an existing `remediation_jobs` database keeps
+working and its rows simply have no pull request recorded yet.
 
 ### Upgrading from the idempotency-only schema
 

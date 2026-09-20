@@ -90,7 +90,12 @@ def test_metrics_aggregate_by_status(tmp_path: Path) -> None:
         metrics = client.get("/remediations/metrics").json()
 
     assert metrics["total"] == 2
-    assert metrics["counts_by_status"] == {"in_progress": 0, "dispatched": 1, "failed": 1}
+    assert metrics["counts_by_status"] == {
+        "in_progress": 0,
+        "dispatched": 1,
+        "pr_created": 0,
+        "failed": 1,
+    }
     assert metrics["active"] == 0
     assert metrics["dispatched"] == 1
     assert metrics["failed"] == 1
@@ -107,6 +112,11 @@ def test_metrics_are_empty_without_jobs(tmp_path: Path) -> None:
         metrics = client.get("/remediations/metrics").json()
 
     assert metrics["total"] == 0
-    assert metrics["counts_by_status"] == {"in_progress": 0, "dispatched": 0, "failed": 0}
+    assert metrics["counts_by_status"] == {
+        "in_progress": 0,
+        "dispatched": 0,
+        "pr_created": 0,
+        "failed": 0,
+    }
     assert metrics["dispatch_attempts"] == 0
     assert metrics["last_dispatched_at"] is None

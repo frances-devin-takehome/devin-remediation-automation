@@ -76,6 +76,25 @@ def signed_request(
     return body, headers
 
 
+def pull_request_payload(
+    *,
+    body: str | None = "Fixes the flaky test.\n\nRemediation-ID: delivery-1\n",
+    number: int = 7,
+    action: str = "opened",
+    repository: str = ALLOWED_REPOSITORY,
+) -> dict[str, Any]:
+    return {
+        "action": action,
+        "repository": {"full_name": repository},
+        "pull_request": {
+            "number": number,
+            "html_url": f"https://github.com/{repository}/pull/{number}",
+            "body": body,
+            "created_at": "2026-09-19T12:00:00Z",
+        },
+    }
+
+
 def labeled_payload(
     label: str = "devin-remediation",
     action: str = "labeled",
