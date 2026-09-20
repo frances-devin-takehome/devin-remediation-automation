@@ -4,6 +4,7 @@ from functools import lru_cache
 
 DEFAULT_DEVIN_API_BASE_URL = "https://api.devin.ai"
 DEFAULT_ALLOWED_REPOSITORY = "frances-devin-takehome/superset"
+DEFAULT_DELIVERY_DB_PATH = "data/deliveries.db"
 
 
 @dataclass(frozen=True)
@@ -13,6 +14,7 @@ class Settings:
     devin_org_id: str
     devin_api_base_url: str = DEFAULT_DEVIN_API_BASE_URL
     allowed_repository: str = DEFAULT_ALLOWED_REPOSITORY
+    delivery_db_path: str = DEFAULT_DELIVERY_DB_PATH
 
 
 def _required(name: str) -> str:
@@ -30,4 +32,5 @@ def get_settings() -> Settings:
         devin_org_id=_required("DEVIN_ORG_ID"),
         devin_api_base_url=os.environ.get("DEVIN_API_BASE_URL", DEFAULT_DEVIN_API_BASE_URL),
         allowed_repository=os.environ.get("ALLOWED_REPOSITORY", DEFAULT_ALLOWED_REPOSITORY),
+        delivery_db_path=os.environ.get("DELIVERY_DB_PATH", DEFAULT_DELIVERY_DB_PATH),
     )

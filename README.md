@@ -19,6 +19,7 @@ Configuration is read from the process environment (see `.env.example` for the f
 | `DEVIN_ORG_ID` | yes | Devin organization ID used in the v3 Organization API path. |
 | `DEVIN_API_BASE_URL` | no | Devin API base URL. Defaults to `https://api.devin.ai`. |
 | `ALLOWED_REPOSITORY` | no | Only issues from this `owner/name` repository dispatch a session. Defaults to `frances-devin-takehome/superset`. |
+| `DELIVERY_DB_PATH` | no | SQLite file recording webhook delivery state for idempotency. Defaults to `data/deliveries.db` (`/data/deliveries.db` in the Docker image). |
 
 Credentials are read from the process environment only; they are never committed or baked into
 the Docker image.
@@ -67,14 +68,32 @@ Interactive API docs are available at http://localhost:8000/docs.
 3. A task is built from the payload (repository full name, issue number, title, URL, and issue
    body/acceptance criteria) asking Devin to investigate, make the smallest appropriate fix, run
    the relevant validation, and open a pull request. The fix itself is not prescribed.
-4. One session is created via the Devin v3 Organization API
+4. The delivery is claimed in SQLite by its `X-GitHub-Delivery` id (see Idempotency below); an
+   already-handled delivery returns without calling Devin.
+5. One session is created via the Devin v3 Organization API
    (`POST {DEVIN_API_BASE_URL}/v3/organizations/{DEVIN_ORG_ID}/sessions`). On success the response
    is `{"status": "dispatched", "devin_session_id": ..., "devin_session_url": ...}` and the
    repository, issue, and session identifiers are logged (never credentials).
-5. If session creation fails, the endpoint returns `502` and the event is not reported as
+6. If session creation fails, the endpoint returns `502` and the event is not reported as
    dispatched.
 
 Tests use a mocked Devin API and never create real sessions.
+
+## Idempotency
+
+Eligible deliveries are recorded in a SQLite table keyed by the `X-GitHub-Delivery` header, so a
+GitHub redelivery never creates a second Devin session:
+
+- The claim is an `INSERT` on that primary key, so exactly one concurrent duplicate wins; the
+  losers return `{"status": "in_progress"}` without calling Devin.
+- Once dispatched, redeliveries return `{"status": "duplicate"}` with the original session id and
+  URL.
+- A failed dispatch is marked `failed` and a later redelivery re-claims it, so failures stay
+  retryable rather than being suppressed.
+- State lives in `DELIVERY_DB_PATH`, so it survives restarts and is shared by processes pointing
+  at the same file. In Docker, mount a volume at `/data` to keep it.
+
+An eligible event without an `X-GitHub-Delivery` header is rejected with `400`.
 
 ## Docker
 
@@ -91,6 +110,7 @@ docker run --rm -p 8000:8000 \
   -e GITHUB_WEBHOOK_SECRET=replace-me \
   -e DEVIN_API_KEY=replace-me \
   -e DEVIN_ORG_ID=replace-me \
+  -v devin-remediation-data:/data \
   devin-remediation-automation
 ```
 
@@ -119,7 +139,8 @@ ruff check .
 src/devin_remediation_automation/
     main.py           # FastAPI app factory
     config.py         # environment-backed settings
-    dependencies.py   # FastAPI providers for the shared HTTP and Devin clients
+    delivery_store.py # SQLite delivery idempotency store
+    dependencies.py   # FastAPI providers for the shared HTTP, Devin, and store clients
     devin_client.py   # Devin v3 Organization API client
     remediation.py    # builds the Devin task from the GitHub issue payload
     security.py       # GitHub webhook signature verification
