@@ -50,11 +50,10 @@ def test_eligible_event_creates_devin_session(
         response = post(client, labeled_payload())
 
     assert response.status_code == 200
-    assert response.json() == {
-        "status": "dispatched",
-        "devin_session_id": "devin-abc1",
-        "devin_session_url": "https://app.devin.ai/sessions/abc1",
-    }
+    payload = response.json()
+    assert payload["status"] == "dispatched"
+    assert payload["devin_session_id"] == "devin-abc1"
+    assert payload["devin_session_url"] == "https://app.devin.ai/sessions/abc1"
 
     assert len(devin_client.calls) == 1
     prompt = devin_client.calls[0]["prompt"]
@@ -64,6 +63,7 @@ def test_eligible_event_creates_devin_session(
     assert f"https://github.com/{ALLOWED_REPOSITORY}/issues/42" in prompt
     assert "Acceptance: test passes 20 runs in a row." in prompt
     assert "pull request" in prompt
+    assert "Remediation-ID: delivery-1" in prompt
 
     logged = caplog.text
     assert "devin-abc1" in logged
@@ -124,7 +124,7 @@ def test_other_issue_action_is_ignored(client: TestClient, devin_client: FakeDev
 
 
 def test_other_event_type_is_ignored(client: TestClient, devin_client: FakeDevinClient) -> None:
-    response = post(client, {"action": "opened"}, event="pull_request")
+    response = post(client, {"ref": "refs/heads/main"}, event="push")
 
     assert response.status_code == 200
     assert response.json()["status"] == "ignored"
