@@ -31,7 +31,7 @@ were remediated by Devin through this pipeline. All PRs are intentionally left o
 | --- | --- | --- | --- |
 | [#1 xlrd constraint/lock mismatch](https://github.com/frances-devin-takehome/superset/issues/1) | Dependency lock drift | [PR #2](https://github.com/frances-devin-takehome/superset/pull/2) | Root cause found (`xlrd` bound lived only in an extra that is not a compile input); one-line constraint added to `requirements/base.in`, lock regenerated, `xlrd 2.0.1 → 2.0.2` only. Predates PR correlation and CI tracking, so no `Remediation-ID`/validation status was recorded. |
 | [#4 Ruff findings](https://github.com/frances-devin-takehome/superset/issues/4) | Code quality | [PR #5](https://github.com/frances-devin-takehome/superset/pull/5) | 39 findings under newer Ruff brought to zero across three Ruff versions with behavior-preserving edits; false positives suppressed with reasoning; formatter drift explicitly left out. Predates correlation/CI tracking; the current `Remediation validation` workflow does not yet cover this category. |
-| [#6 vulnerable python-multipart pin](https://github.com/frances-devin-takehome/superset/issues/6) | Security dependency | [PR #7](https://github.com/frances-devin-takehome/superset/pull/7) | Transitive pin (via `mcp`/`fastmcp-slim`) bumped `0.0.29 → 0.0.32`, fixing four advisories (CVE-2026-53537..53540); scoped `--upgrade-package` recompile, one line changed. Carries `Remediation-ID`; [`Remediation validation` passed](https://github.com/frances-devin-takehome/superset/actions/runs/35534835834), which the service records as `succeeded`. |
+| [#6 vulnerable python-multipart pin](https://github.com/frances-devin-takehome/superset/issues/6) | Security dependency | [PR #7](https://github.com/frances-devin-takehome/superset/pull/7) | Transitive pin (via `mcp`/`fastmcp-slim`) bumped `0.0.29 → 0.0.32`, fixing four advisories (CVE-2026-53537..53540); scoped `--upgrade-package` recompile, one line changed. Carries `Remediation-ID`; [`Remediation validation` passed](https://github.com/frances-devin-takehome/superset/actions/runs/35534835834), and the service recorded the job as `succeeded` (see the example under Observability). |
 
 Only the third issue exercised the complete lifecycle end to end; the first two were dispatched by earlier
 revisions of the service, before the PR-correlation and CI-tracking stages existed.
@@ -111,7 +111,7 @@ completed result (`ci_running` is only applied when the job is not already `succ
 | `GET /remediations/metrics` | aggregate counts and operational timestamps |
 | `GET /health` | liveness |
 
-A successful remediation (`GET /remediations/{delivery_id}`, abbreviated):
+A real successful remediation (`GET /remediations/{delivery_id}` for issue #6 / PR #7):
 
 ```json
 {
@@ -119,17 +119,28 @@ A successful remediation (`GET /remediations/{delivery_id}`, abbreviated):
   "repository": "frances-devin-takehome/superset",
   "issue_number": 6,
   "issue_title": "Remediate vulnerable python-multipart dependency pin",
+  "issue_url": "https://github.com/frances-devin-takehome/superset/issues/6",
   "status": "succeeded",
   "attempts": 1,
-  "devin_session_id": "devin-…",
-  "devin_session_url": "https://app.devin.ai/sessions/…",
+  "created_at": "2026-09-20 20:11:09",
+  "updated_at": "2026-09-20 20:46:27",
+  "dispatched_at": "2026-09-20 20:11:10",
+  "devin_session_id": "b8a62d6d7a5f42b1922626ba7694bd15",
+  "devin_session_url": "https://app.devin.ai/sessions/b8a62d6d7a5f42b1922626ba7694bd15",
+  "last_error": null,
   "pr_number": 7,
   "pr_url": "https://github.com/frances-devin-takehome/superset/pull/7",
-  "ci_run_url": "https://github.com/frances-devin-takehome/superset/actions/runs/…",
+  "pr_created_at": "2026-09-20T20:13:14Z",
+  "ci_run_id": 35534835834,
+  "ci_run_url": "https://github.com/frances-devin-takehome/superset/actions/runs/35534835834",
   "ci_conclusion": "success",
-  "ci_completed_at": "…"
+  "ci_completed_at": "2026-09-20T20:46:26Z"
 }
 ```
+
+Timestamps the service writes itself (`created_at`, `updated_at`, `dispatched_at`) are SQLite
+`CURRENT_TIMESTAMP` strings; `pr_created_at` and `ci_completed_at` are copied verbatim from the
+GitHub payloads, hence the ISO-8601 format.
 
 Metrics shape:
 
