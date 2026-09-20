@@ -19,7 +19,7 @@ Configuration is read from the process environment (see `.env.example` for the f
 | `DEVIN_ORG_ID` | yes | Devin organization ID used in the v3 Organization API path. |
 | `DEVIN_API_BASE_URL` | no | Devin API base URL. Defaults to `https://api.devin.ai`. |
 | `ALLOWED_REPOSITORY` | no | Only issues from this `owner/name` repository dispatch a session. Defaults to `frances-devin-takehome/superset`. |
-| `DELIVERY_DB_PATH` | no | SQLite file recording webhook delivery state for idempotency. Defaults to `data/deliveries.db` (`/data/deliveries.db` in the Docker image). |
+| `DELIVERY_DB_PATH` | no | SQLite file recording remediation jobs (idempotency + lifecycle state). Defaults to `data/deliveries.db` (`/data/deliveries.db` in the Docker image). |
 
 Credentials are read from the process environment only; they are never committed or baked into
 the Docker image.
@@ -57,6 +57,10 @@ Interactive API docs are available at http://localhost:8000/docs.
 - `GET /health` — liveness check.
 - `POST /webhooks/github` — GitHub webhook receiver. Other valid events return
   `{"status": "ignored"}`; an invalid or missing signature returns `401`.
+- `GET /remediations` — read-only list of remediation jobs, newest first. Supports
+  `?status=in_progress|dispatched|failed`, `?limit=` (1–200, default 50) and `?offset=`.
+- `GET /remediations/metrics` — aggregate counts and operational timestamps.
+- `GET /remediations/{delivery_id}` — a single job, or `404` if the delivery is unknown.
 
 ## Event → Devin session flow
 
@@ -78,6 +82,36 @@ Interactive API docs are available at http://localhost:8000/docs.
    dispatched.
 
 Tests use a mocked Devin API and never create real sessions.
+
+## Remediation state and observability
+
+Each eligible delivery is persisted as a remediation job in the `remediation_jobs` SQLite table:
+GitHub delivery id (primary key), repository, issue number/title/URL, status, Devin session
+id/URL once created, dispatch attempt count, last failure message, and `created_at` /
+`updated_at` / `dispatched_at` timestamps.
+
+Statuses are `in_progress` (a dispatch attempt is running), `dispatched` (a Devin session was
+created) and `failed` (the Devin API call failed; the delivery stays retryable).
+**`dispatched` is not a successful remediation** — the service does not yet track the session
+outcome or the resulting pull request, so operators should read it as "handed to Devin".
+
+`GET /remediations/metrics` returns:
+
+```json
+{
+  "total": 3,
+  "counts_by_status": {"in_progress": 1, "dispatched": 1, "failed": 1},
+  "active": 1,
+  "dispatched": 1,
+  "failed": 1,
+  "dispatch_attempts": 4,
+  "last_dispatched_at": "2026-09-19 13:40:02",
+  "oldest_in_progress_at": "2026-09-19 13:41:55"
+}
+```
+
+`dispatch_attempts` counts Devin dispatch attempts including retries, and
+`oldest_in_progress_at` surfaces work that is stuck mid-dispatch.
 
 ## Idempotency
 
@@ -139,12 +173,13 @@ ruff check .
 src/devin_remediation_automation/
     main.py           # FastAPI app factory
     config.py         # environment-backed settings
-    delivery_store.py # SQLite delivery idempotency store
+    remediation_store.py # SQLite remediation job store (idempotency + lifecycle state)
     dependencies.py   # FastAPI providers for the shared HTTP, Devin, and store clients
     devin_client.py   # Devin v3 Organization API client
     remediation.py    # builds the Devin task from the GitHub issue payload
     security.py       # GitHub webhook signature verification
     api/health.py     # GET /health
+    api/remediations.py # read-only remediation job + metrics endpoints
     api/webhooks.py   # POST /webhooks/github
 tests/
 ```

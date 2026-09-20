@@ -7,8 +7,7 @@ from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel
 
 from devin_remediation_automation.config import Settings, get_settings
-from devin_remediation_automation.delivery_store import DeliveryStatus, DeliveryStore
-from devin_remediation_automation.dependencies import get_delivery_store, get_devin_client
+from devin_remediation_automation.dependencies import get_devin_client, get_remediation_store
 from devin_remediation_automation.devin_client import DevinAPIError, DevinClient
 from devin_remediation_automation.remediation import (
     REMEDIATION_LABEL,
@@ -16,6 +15,7 @@ from devin_remediation_automation.remediation import (
     build_session_prompt,
     build_session_title,
 )
+from devin_remediation_automation.remediation_store import RemediationStatus, RemediationStore
 from devin_remediation_automation.security import verify_signature
 
 logger = logging.getLogger(__name__)
@@ -57,7 +57,7 @@ async def receive_github_webhook(
     request: Request,
     settings: Annotated[Settings, Depends(get_settings)],
     devin_client: Annotated[DevinClient, Depends(get_devin_client)],
-    delivery_store: Annotated[DeliveryStore, Depends(get_delivery_store)],
+    remediation_store: Annotated[RemediationStore, Depends(get_remediation_store)],
     x_github_event: Annotated[str | None, Header()] = None,
     x_github_delivery: Annotated[str | None, Header()] = None,
     x_hub_signature_256: Annotated[str | None, Header()] = None,
@@ -110,21 +110,21 @@ async def receive_github_webhook(
         remediation.issue_url,
     )
 
-    claim = await run_in_threadpool(delivery_store.claim, x_github_delivery)
+    claim = await run_in_threadpool(remediation_store.claim, x_github_delivery, remediation)
     if not claim.acquired:
         logger.info(
             "Skipping duplicate delivery: delivery_id=%s status=%s devin_session_id=%s",
             x_github_delivery,
-            claim.status.value,
-            claim.devin_session_id,
+            claim.job.status.value,
+            claim.job.devin_session_id,
         )
         duplicate_status = (
-            "duplicate" if claim.status is DeliveryStatus.DISPATCHED else "in_progress"
+            "duplicate" if claim.job.status is RemediationStatus.DISPATCHED else "in_progress"
         )
         return WebhookResponse(
             status=duplicate_status,
-            devin_session_id=claim.devin_session_id,
-            devin_session_url=claim.devin_session_url,
+            devin_session_id=claim.job.devin_session_id,
+            devin_session_url=claim.job.devin_session_url,
         )
 
     try:
@@ -133,8 +133,8 @@ async def receive_github_webhook(
             title=build_session_title(remediation),
             tags=["remediation", "github-issue"],
         )
-    except DevinAPIError:
-        await run_in_threadpool(delivery_store.mark_failed, x_github_delivery)
+    except DevinAPIError as exc:
+        await run_in_threadpool(remediation_store.mark_failed, x_github_delivery, str(exc))
         logger.exception(
             "Failed to create Devin session: repository=%s issue_number=%s",
             remediation.repository_full_name,
@@ -143,7 +143,7 @@ async def receive_github_webhook(
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, "Failed to create Devin session") from None
 
     await run_in_threadpool(
-        delivery_store.mark_dispatched, x_github_delivery, session.session_id, session.url
+        remediation_store.mark_dispatched, x_github_delivery, session.session_id, session.url
     )
     logger.info(
         "Created Devin session: delivery_id=%s repository=%s issue_number=%s "

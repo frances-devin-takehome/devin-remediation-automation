@@ -7,10 +7,19 @@ import httpx
 import pytest
 from fastapi.testclient import TestClient
 
-from devin_remediation_automation.delivery_store import DeliveryStatus, DeliveryStore
 from devin_remediation_automation.dependencies import get_devin_client
 from devin_remediation_automation.devin_client import DevinAPIError
+from devin_remediation_automation.remediation import RemediationRequest
+from devin_remediation_automation.remediation_store import RemediationStatus, RemediationStore
 from helpers import FakeDevinClient, build_app, labeled_payload, signed_request
+
+REQUEST = RemediationRequest(
+    repository_full_name="frances-devin-takehome/superset",
+    issue_number=42,
+    issue_title="Flaky login test",
+    issue_url="https://github.com/frances-devin-takehome/superset/issues/42",
+    issue_body="body",
+)
 
 
 def post(client: TestClient, delivery_id: str = "delivery-1") -> httpx.Response:
@@ -21,7 +30,7 @@ def post(client: TestClient, delivery_id: str = "delivery-1") -> httpx.Response:
 def stored_status(database_path: Path, delivery_id: str) -> str:
     with sqlite3.connect(database_path) as connection:
         row = connection.execute(
-            "SELECT status FROM deliveries WHERE delivery_id = ?", (delivery_id,)
+            "SELECT status FROM remediation_jobs WHERE delivery_id = ?", (delivery_id,)
         ).fetchone()
     return row[0]
 
@@ -85,7 +94,7 @@ def test_failed_dispatch_is_retryable(tmp_path: Path) -> None:
     with TestClient(app) as client:
         failure = post(client)
         assert failure.status_code == 502
-        assert stored_status(database_path, "delivery-1") == DeliveryStatus.FAILED.value
+        assert stored_status(database_path, "delivery-1") == RemediationStatus.FAILED.value
 
         app.dependency_overrides[get_devin_client] = lambda: succeeding
         retry = post(client)
@@ -93,7 +102,7 @@ def test_failed_dispatch_is_retryable(tmp_path: Path) -> None:
     assert retry.status_code == 200
     assert retry.json()["status"] == "dispatched"
     assert len(succeeding.calls) == 1
-    assert stored_status(database_path, "delivery-1") == DeliveryStatus.DISPATCHED.value
+    assert stored_status(database_path, "delivery-1") == RemediationStatus.DISPATCHED.value
 
 
 async def test_concurrent_duplicate_deliveries_dispatch_once(tmp_path: Path) -> None:
@@ -113,10 +122,10 @@ async def test_concurrent_duplicate_deliveries_dispatch_once(tmp_path: Path) -> 
 
 
 def test_store_claim_is_exclusive_across_threads(tmp_path: Path) -> None:
-    store = DeliveryStore(tmp_path / "deliveries.db")
+    store = RemediationStore(tmp_path / "deliveries.db")
 
     with ThreadPoolExecutor(max_workers=8) as pool:
-        claims = list(pool.map(lambda _: store.claim("delivery-1"), range(8)))
+        claims = list(pool.map(lambda _: store.claim("delivery-1", REQUEST), range(8)))
 
     assert sum(claim.acquired for claim in claims) == 1
 
@@ -124,18 +133,54 @@ def test_store_claim_is_exclusive_across_threads(tmp_path: Path) -> None:
 def test_store_creates_parent_directory(tmp_path: Path) -> None:
     database_path = tmp_path / "nested" / "deliveries.db"
 
-    DeliveryStore(database_path)
+    RemediationStore(database_path)
 
     assert database_path.exists()
 
 
-@pytest.mark.parametrize("status", list(DeliveryStatus))
-def test_store_status_round_trip(tmp_path: Path, status: DeliveryStatus) -> None:
-    store = DeliveryStore(tmp_path / f"{status.value}.db")
-    store.claim("delivery-1")
-    if status is DeliveryStatus.DISPATCHED:
+@pytest.mark.parametrize("status", list(RemediationStatus))
+def test_store_status_round_trip(tmp_path: Path, status: RemediationStatus) -> None:
+    store = RemediationStore(tmp_path / f"{status.value}.db")
+    store.claim("delivery-1", REQUEST)
+    if status is RemediationStatus.DISPATCHED:
         store.mark_dispatched("delivery-1", "devin-1", "https://app.devin.ai/sessions/1")
-    elif status is DeliveryStatus.FAILED:
-        store.mark_failed("delivery-1")
+    elif status is RemediationStatus.FAILED:
+        store.mark_failed("delivery-1", "boom")
 
     assert stored_status(tmp_path / f"{status.value}.db", "delivery-1") == status.value
+
+
+def test_retry_increments_attempts_and_clears_error(tmp_path: Path) -> None:
+    store = RemediationStore(tmp_path / "deliveries.db")
+    store.claim("delivery-1", REQUEST)
+    store.mark_failed("delivery-1", "Devin API request failed: 500")
+
+    failed = store.get("delivery-1")
+    assert failed is not None
+    assert failed.attempts == 1
+    assert failed.last_error == "Devin API request failed: 500"
+    assert failed.dispatched_at is None
+
+    claim = store.claim("delivery-1", REQUEST)
+    store.mark_dispatched("delivery-1", "devin-1", "https://app.devin.ai/sessions/1")
+
+    retried = store.get("delivery-1")
+    assert claim.acquired
+    assert retried is not None
+    assert retried.attempts == 2
+    assert retried.last_error is None
+    assert retried.dispatched_at is not None
+
+
+def test_claim_records_issue_metadata(tmp_path: Path) -> None:
+    store = RemediationStore(tmp_path / "deliveries.db")
+
+    job = store.claim("delivery-1", REQUEST).job
+
+    assert (job.repository, job.issue_number, job.issue_title, job.issue_url) == (
+        REQUEST.repository_full_name,
+        REQUEST.issue_number,
+        REQUEST.issue_title,
+        REQUEST.issue_url,
+    )
+    assert job.status is RemediationStatus.IN_PROGRESS
