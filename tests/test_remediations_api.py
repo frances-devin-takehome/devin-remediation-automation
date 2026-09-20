@@ -98,12 +98,10 @@ def test_metrics_aggregate_by_status(tmp_path: Path) -> None:
         "succeeded": 0,
         "failed": 1,
     }
-    assert metrics["active"] == 0
-    assert metrics["dispatched"] == 1
-    assert metrics["failed"] == 1
     # The failed delivery was attempted twice; dispatched counts sessions created, not fixes.
-    assert metrics["dispatch_attempts"] == 3
-    assert metrics["last_dispatched_at"] is not None
+    assert metrics["dispatch"]["attempts"] == 3
+    assert metrics["dispatch"]["last_dispatched_at"] is not None
+    assert "dispatched" not in metrics
     assert metrics["oldest_in_progress_at"] is None
 
 
@@ -122,5 +120,4 @@ def test_metrics_are_empty_without_jobs(tmp_path: Path) -> None:
         "succeeded": 0,
         "failed": 0,
     }
-    assert metrics["dispatch_attempts"] == 0
-    assert metrics["last_dispatched_at"] is None
+    assert metrics["dispatch"] == {"attempts": 0, "last_dispatched_at": None}

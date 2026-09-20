@@ -123,20 +123,17 @@ is never re-dispatched.
     "in_progress": 1, "dispatched": 1, "pr_created": 1,
     "ci_running": 1, "succeeded": 1, "failed": 1
   },
-  "active": 1,
-  "dispatched": 1,
-  "pr_created": 1,
-  "ci_running": 1,
-  "succeeded": 1,
-  "failed": 1,
-  "dispatch_attempts": 7,
-  "last_dispatched_at": "2026-09-19 13:40:02",
+  "dispatch": {
+    "attempts": 7,
+    "last_dispatched_at": "2026-09-19 13:40:02"
+  },
   "oldest_in_progress_at": "2026-09-19 13:41:55"
 }
 ```
 
-`dispatch_attempts` counts Devin dispatch attempts including retries, and
-`oldest_in_progress_at` surfaces work that is stuck mid-dispatch.
+`counts_by_status` is the single source of truth for current lifecycle state, while `dispatch`
+holds historical counters: `attempts` counts Devin dispatch attempts including retries, so it
+can exceed `total`. `oldest_in_progress_at` surfaces work that is stuck mid-dispatch.
 
 ## Pull request correlation
 

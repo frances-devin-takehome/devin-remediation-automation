@@ -46,23 +46,24 @@ class RemediationListResponse(BaseModel):
     jobs: list[RemediationJobResponse]
 
 
+class DispatchMetrics(BaseModel):
+    """Historical Devin dispatch counters, including retries of earlier attempts."""
+
+    attempts: int
+    last_dispatched_at: str | None = None
+
+
 class RemediationMetricsResponse(BaseModel):
     """Aggregate view of remediation work.
 
-    `dispatched` counts jobs whose Devin session was created and `pr_created` those with a
-    correlated pull request; only `succeeded` means the validation workflow passed.
+    `counts_by_status` is the single source of truth for current job states: `dispatched`
+    counts jobs whose Devin session was created and `pr_created` those with a correlated pull
+    request, while only `succeeded` means the validation workflow passed.
     """
 
     total: int
     counts_by_status: dict[str, int]
-    active: int
-    dispatched: int
-    pr_created: int
-    ci_running: int
-    succeeded: int
-    failed: int
-    dispatch_attempts: int
-    last_dispatched_at: str | None = None
+    dispatch: DispatchMetrics
     oldest_in_progress_at: str | None = None
 
 
@@ -84,18 +85,13 @@ async def get_remediation_metrics(
     store: Annotated[RemediationStore, Depends(get_remediation_store)],
 ) -> RemediationMetricsResponse:
     summary = await run_in_threadpool(store.summary)
-    counts = summary.counts_by_status
     return RemediationMetricsResponse(
         total=summary.total,
-        counts_by_status=counts,
-        active=counts[RemediationStatus.IN_PROGRESS.value],
-        dispatched=counts[RemediationStatus.DISPATCHED.value],
-        pr_created=counts[RemediationStatus.PR_CREATED.value],
-        ci_running=counts[RemediationStatus.CI_RUNNING.value],
-        succeeded=counts[RemediationStatus.SUCCEEDED.value],
-        failed=counts[RemediationStatus.FAILED.value],
-        dispatch_attempts=summary.dispatch_attempts,
-        last_dispatched_at=summary.last_dispatched_at,
+        counts_by_status=summary.counts_by_status,
+        dispatch=DispatchMetrics(
+            attempts=summary.dispatch_attempts,
+            last_dispatched_at=summary.last_dispatched_at,
+        ),
         oldest_in_progress_at=summary.oldest_in_progress_at,
     )
 
