@@ -1,120 +1,137 @@
 # devin-remediation-automation
 
-Python service that will orchestrate automated engineering remediation using GitHub webhooks and
-the Devin API. A GitHub issue labeled `devin-remediation` in the allowed repository triggers a
-Devin session that remediates the issue.
+A small FastAPI service that turns a labeled GitHub issue into a validated pull request, using
+Devin as the engineer that does the remediation work.
 
-## Requirements
+## Overview
 
-- Python 3.12
+**Problem.** Routine remediation work — dependency lock drift, vulnerable transitive pins,
+linter findings — is well specified but tedious, and it is never a single command: each ticket
+needs someone to read the repo, decide the *smallest safe* change, run the right validation, and
+write up the reasoning in a PR. That is exactly the work that stalls in backlogs.
 
-## Configuration
+**Workflow automated.** A human triages an issue and adds one label. From that point the system
+dispatches a Devin session, correlates the PR Devin opens back to the originating issue, tracks the
+repository's own CI on that PR, and exposes the full lifecycle over a read-only API. The human's
+remaining job is code review and merge.
 
-Configuration is read from the process environment (see `.env.example` for the full list):
+**Why Devin is the core primitive.** The fix is not prescribed. Each issue is ambiguous in
+a way scripts cannot handle: "pin is vulnerable, find the smallest safe upgrade", "align a
+constraint with the lock", "address Ruff findings without changing behavior". Devin investigates
+the codebase, chooses the change, runs the repo's own tooling, and explains the root cause in the
+PR. The service around it is deliberately thin — it provides the approval gate, idempotency,
+state, and independent validation that make an autonomous engineer safe to run on a real repo.
 
-| Variable | Required | Description |
-| --- | --- | --- |
-| `GITHUB_WEBHOOK_SECRET` | yes | Shared secret configured on the GitHub webhook, used to verify the `X-Hub-Signature-256` header. |
-| `DEVIN_API_KEY` | yes | API key of a Devin service user with the `ManageOrgSessions` permission. Sent as `Authorization: Bearer`. |
-| `DEVIN_ORG_ID` | yes | Devin organization ID used in the v3 Organization API path. |
-| `DEVIN_API_BASE_URL` | no | Devin API base URL. Defaults to `https://api.devin.ai`. |
-| `ALLOWED_REPOSITORY` | no | Only issues from this `owner/name` repository dispatch a session. Defaults to `frances-devin-takehome/superset`. |
-| `DELIVERY_DB_PATH` | no | SQLite file recording remediation jobs (idempotency + lifecycle state). Defaults to `data/deliveries.db` (`/data/deliveries.db` in the Docker image). |
+## Real remediation results
 
-Credentials are read from the process environment only; they are never committed or baked into
-the Docker image.
+Three real issues in the fork [`frances-devin-takehome/superset`](https://github.com/frances-devin-takehome/superset)
+were remediated by Devin through this pipeline. All PRs are intentionally left open for review.
 
-## Local development
+| Issue | Category | PR | Outcome |
+| --- | --- | --- | --- |
+| [#1 xlrd constraint/lock mismatch](https://github.com/frances-devin-takehome/superset/issues/1) | Dependency lock drift | [PR #2](https://github.com/frances-devin-takehome/superset/pull/2) | Root cause found (`xlrd` bound lived only in an extra that is not a compile input); one-line constraint added to `requirements/base.in`, lock regenerated, `xlrd 2.0.1 → 2.0.2` only. Predates PR correlation and CI tracking, so no `Remediation-ID`/validation status was recorded. |
+| [#4 Ruff findings](https://github.com/frances-devin-takehome/superset/issues/4) | Code quality | [PR #5](https://github.com/frances-devin-takehome/superset/pull/5) | 39 findings under newer Ruff brought to zero across three Ruff versions with behavior-preserving edits; false positives suppressed with reasoning; formatter drift explicitly left out. Predates correlation/CI tracking; the current `Remediation validation` workflow does not yet cover this category. |
+| [#6 vulnerable python-multipart pin](https://github.com/frances-devin-takehome/superset/issues/6) | Security dependency | [PR #7](https://github.com/frances-devin-takehome/superset/pull/7) | Transitive pin (via `mcp`/`fastmcp-slim`) bumped `0.0.29 → 0.0.32`, fixing four advisories (CVE-2026-53537..53540); scoped `--upgrade-package` recompile, one line changed. Carries `Remediation-ID`; [`Remediation validation` passed](https://github.com/frances-devin-takehome/superset/actions/runs/35534835834), which the service records as `succeeded`. |
 
-Create a virtual environment and install the project with development dependencies:
+Only the third issue exercised the complete lifecycle end to end; the first two were dispatched by earlier
+revisions of the service, before the PR-correlation and CI-tracking stages existed.
 
-```bash
-python3.12 -m venv .venv
-source .venv/bin/activate
-pip install -e ".[dev]"
+## What the system does
+
+1. A human adds the `devin-remediation` label to an issue in the allowed repository.
+2. GitHub delivers an `issues` webhook to `POST /webhooks/github`.
+3. The service verifies the `X-Hub-Signature-256` HMAC, checks the repository allowlist, checks
+   eligibility (`action == labeled`, label exactly `devin-remediation`), and claims the
+   `X-GitHub-Delivery` id in SQLite so redeliveries never create a second session.
+4. It builds a task from the issue (title, URL, body/acceptance criteria) and creates one Devin
+   session via the v3 Organization API. The task asks Devin to investigate, make the smallest
+   appropriate fix, run the relevant validation, open a PR, and include
+   `Remediation-ID: <delivery_id>` in the PR body.
+5. Devin investigates, fixes, tests, and opens the PR against the same repository.
+6. The `pull_request` (`opened`) webhook is read for the `Remediation-ID` marker and correlated
+   back to the job → `pr_created`.
+7. The repository's `Remediation validation` GitHub Actions workflow runs on the PR,
+   independently of Devin.
+8. `workflow_run` webhooks move the job to `ci_running`, then `succeeded` (conclusion `success`)
+   or `failed` (any other conclusion).
+
+## Architecture
+
+```mermaid
+flowchart TD
+    Issue[GitHub issue] -->|"human adds<br/>devin-remediation label"| Gate{{Human approval gate}}
+    Gate -->|issues webhook| Svc[FastAPI automation service<br/>POST /webhooks/github]
+    Svc -->|HMAC · allowlist · eligibility · idempotency| DB[(SQLite<br/>remediation_jobs)]
+    Svc -->|create session| Devin[Devin API / session]
+    Devin -->|investigate · fix · test| PR[GitHub pull request<br/>Remediation-ID: delivery_id]
+    PR -->|pull_request webhook| Svc
+    PR --> CI[Remediation validation<br/>GitHub Actions workflow]
+    CI -->|workflow_run webhook| Svc
+    DB --> API[GET /remediations<br/>GET /remediations/metrics]
+    Svc -.->|ci_running → succeeded / failed| DB
+
+    classDef gate fill:#fff3cd,stroke:#b8860b,stroke-width:2px;
+    classDef ci fill:#d4edda,stroke:#2e7d32,stroke-width:2px;
+    class Gate gate;
+    class CI ci;
 ```
 
-Run the service:
+Two things are deliberate: nothing is dispatched without the label (yellow), and the final
+verdict comes from deterministic CI in the target repository, not from the agent's own report
+(green).
 
-```bash
-export GITHUB_WEBHOOK_SECRET=replace-me
-export DEVIN_API_KEY=replace-me
-export DEVIN_ORG_ID=replace-me
-uvicorn devin_remediation_automation.main:app --reload --port 8000
+## Remediation lifecycle
+
 ```
-
-Check the health endpoint:
-
-```bash
-curl http://localhost:8000/health
-# {"status":"healthy"}
+in_progress → dispatched → pr_created → ci_running → succeeded | failed
 ```
-
-Interactive API docs are available at http://localhost:8000/docs.
-
-## Endpoints
-
-- `GET /health` — liveness check.
-- `POST /webhooks/github` — GitHub webhook receiver. Other valid events return
-  `{"status": "ignored"}`; an invalid or missing signature returns `401`.
-- `GET /remediations` — read-only list of remediation jobs, newest first. Supports
-  `?status=in_progress|dispatched|pr_created|ci_running|succeeded|failed`, `?limit=` (1–200,
-  default 50) and `?offset=`.
-- `GET /remediations/metrics` — aggregate counts and operational timestamps.
-- `GET /remediations/{delivery_id}` — a single job, or `404` if the delivery is unknown.
-
-## Event → Devin session flow
-
-1. GitHub delivers an `issues` event; the `X-Hub-Signature-256` header is verified against
-   `GITHUB_WEBHOOK_SECRET` (as it is for every event, including `pull_request` and
-   `workflow_run`).
-2. The event is eligible only when `action` is `labeled`, the added label is exactly
-   `devin-remediation`, and the repository full name equals `ALLOWED_REPOSITORY`. Anything else is
-   ignored without calling Devin.
-3. A task is built from the payload (repository full name, issue number, title, URL, and issue
-   body/acceptance criteria) asking Devin to investigate, make the smallest appropriate fix, run
-   the relevant validation, and open a pull request. The fix itself is not prescribed. The task
-   also asks Devin to put `Remediation-ID: <delivery_id>` in the pull request body (see Pull
-   request correlation below).
-4. The delivery is claimed in SQLite by its `X-GitHub-Delivery` id (see Idempotency below); an
-   already-handled delivery returns without calling Devin.
-5. One session is created via the Devin v3 Organization API
-   (`POST {DEVIN_API_BASE_URL}/v3/organizations/{DEVIN_ORG_ID}/sessions`). On success the response
-   is `{"status": "dispatched", "devin_session_id": ..., "devin_session_url": ...}` and the
-   repository, issue, and session identifiers are logged (never credentials).
-6. If session creation fails, the endpoint returns `502` and the event is not reported as
-   dispatched.
-7. When Devin opens the pull request, the resulting `pull_request` event correlates it back to
-   the job and moves it to `pr_created`; the `Remediation validation` workflow then decides
-   whether the job ends up `succeeded` or `failed` (see CI outcome tracking below).
-
-Tests use a mocked Devin API and never create real sessions.
-
-## Remediation state and observability
-
-Each eligible delivery is persisted as a remediation job in the `remediation_jobs` SQLite table:
-GitHub delivery id (primary key), repository, issue number/title/URL, status, Devin session
-id/URL once created, dispatch attempt count, last failure message, pull request number/URL/
-creation time once correlated, validation workflow run id/URL/conclusion/completion time, and
-`created_at` / `updated_at` / `dispatched_at` timestamps.
-
-Statuses:
 
 | status | meaning |
 | --- | --- |
-| `in_progress` | a dispatch attempt is running |
+| `in_progress` | delivery claimed; Devin session creation is in flight |
 | `dispatched` | a Devin session was created |
-| `pr_created` | Devin opened a pull request for the job |
-| `ci_running` | the `Remediation validation` workflow is running for that pull request |
-| `succeeded` | the validation workflow completed successfully |
-| `failed` | the Devin API call failed (retryable), or validation completed with a failure-like conclusion |
+| `pr_created` | a PR carrying this job's `Remediation-ID` was opened |
+| `ci_running` | `Remediation validation` is queued/running for that PR |
+| `succeeded` | the validation workflow completed with conclusion `success` |
+| `failed` | Devin session creation failed (retryable by redelivery), **or** validation completed with any non-success conclusion (terminal, never re-dispatched) |
 
-Only `succeeded` means the remediation was independently validated; `dispatched` and
-`pr_created` just mean "handed to Devin" and "Devin produced a pull request". A `failed` job is
-only retried by a redelivery when it never reached Devin — a validation failure is terminal and
-is never re-dispatched.
+**Only `succeeded` means independent validation passed.** `dispatched` means "handed to Devin";
+`pr_created` means "Devin produced a PR". Neither is a claim that the fix is correct.
 
-`GET /remediations/metrics` returns:
+Rerun semantics: the latest *completed* workflow run wins, so a failed run followed by a
+successful rerun ends `succeeded`, and vice versa. A queued/in-progress event never regresses a
+completed result (`ci_running` is only applied when the job is not already `succeeded`/`failed`).
+
+## Observability
+
+| Endpoint | Purpose |
+| --- | --- |
+| `GET /remediations` | newest-first list; `?status=<lifecycle status>`, `?limit=` (1–200, default 50), `?offset=` |
+| `GET /remediations/{delivery_id}` | one job, `404` if unknown |
+| `GET /remediations/metrics` | aggregate counts and operational timestamps |
+| `GET /health` | liveness |
+
+A successful remediation (`GET /remediations/{delivery_id}`, abbreviated):
+
+```json
+{
+  "delivery_id": "6abfc880-b52f-11f1-998e-e3d59f35295d",
+  "repository": "frances-devin-takehome/superset",
+  "issue_number": 6,
+  "issue_title": "Remediate vulnerable python-multipart dependency pin",
+  "status": "succeeded",
+  "attempts": 1,
+  "devin_session_id": "devin-…",
+  "devin_session_url": "https://app.devin.ai/sessions/…",
+  "pr_number": 7,
+  "pr_url": "https://github.com/frances-devin-takehome/superset/pull/7",
+  "ci_run_url": "https://github.com/frances-devin-takehome/superset/actions/runs/…",
+  "ci_conclusion": "success",
+  "ci_completed_at": "…"
+}
+```
+
+Metrics shape:
 
 ```json
 {
@@ -123,103 +140,40 @@ is never re-dispatched.
     "in_progress": 1, "dispatched": 1, "pr_created": 1,
     "ci_running": 1, "succeeded": 1, "failed": 1
   },
-  "dispatch": {
-    "attempts": 7,
-    "last_dispatched_at": "2026-09-19 13:40:02"
-  },
+  "dispatch": { "attempts": 7, "last_dispatched_at": "2026-09-19 13:40:02" },
   "oldest_in_progress_at": "2026-09-19 13:41:55"
 }
 ```
 
-`counts_by_status` is the single source of truth for current lifecycle state, while `dispatch`
-holds historical counters: `attempts` counts Devin dispatch attempts including retries, so it
-can exceed `total`. `oldest_in_progress_at` surfaces work that is stuck mid-dispatch.
+- `counts_by_status` — **current state**: each job counted once, under its present status.
+- `dispatch` — **historical**: `attempts` counts every Devin dispatch attempt including retries of
+  failed ones, so it can exceed `total`.
+- `oldest_in_progress_at` surfaces work stuck mid-dispatch.
 
-## Pull request correlation
+## Running locally
 
-The remediation prompt instructs Devin to include the marker line `Remediation-ID: <delivery_id>`
-in the pull request body. The webhook also accepts `pull_request` events:
+**Prerequisites:** Docker (or Python 3.12 for a non-container run), a GitHub webhook secret, and
+a Devin service-user API key with `ManageOrgSessions` plus the Devin organization id.
 
-- Only `action: opened` from `ALLOWED_REPOSITORY` is considered; everything else is ignored.
-- The marker is read from the PR body and used to look up the job by delivery id. A PR with no
-  marker, or a marker naming an unknown delivery, is ignored with `200` rather than treated as an
-  error — plenty of pull requests are unrelated to remediation.
-- A match records the PR number, URL and creation time and moves the job to `pr_created`; the
-  response is `{"status": "pr_correlated", "remediation_id": ..., "pr_number": ...}`.
-- Correlation is a conditional update on an existing job, so a `pull_request` event never creates
-  a job, and a redelivery is a no-op. A job keeps the first pull request it was correlated with;
-  a later, different one returns `{"status": "duplicate"}` and leaves the record untouched.
+**Environment variables** (see `.env.example`; secrets are read from the environment only and are
+never baked into the image):
 
-## CI outcome tracking
+| Variable | Required | Description |
+| --- | --- | --- |
+| `GITHUB_WEBHOOK_SECRET` | yes | Shared secret on the GitHub webhook; verifies `X-Hub-Signature-256`. |
+| `DEVIN_API_KEY` | yes | Devin service-user API key (`ManageOrgSessions`). Sent as `Authorization: Bearer`. |
+| `DEVIN_ORG_ID` | yes | Devin organization id used in the v3 API path. |
+| `DEVIN_API_BASE_URL` | no | Defaults to `https://api.devin.ai`. |
+| `ALLOWED_REPOSITORY` | no | `owner/name` allowed to dispatch. Defaults to `frances-devin-takehome/superset`. |
+| `DELIVERY_DB_PATH` | no | SQLite file for job state. Defaults to `data/deliveries.db` (`/data/deliveries.db` in Docker). |
 
-The fork runs a GitHub Actions workflow named `Remediation validation` on remediation pull
-requests, and the service listens for its `workflow_run` events:
-
-- Only runs from `ALLOWED_REPOSITORY` whose `workflow_run.name` is `Remediation validation` are
-  considered; other workflows are ignored.
-- The run is correlated by the pull request number in `workflow_run.pull_requests`, matched
-  against the `pr_number` recorded during PR correlation. A run with no pull request, or one
-  belonging to no remediation, is ignored with `200`.
-- A run that is not yet `completed` moves the job to `ci_running`; a completed run moves it to
-  `succeeded` when the conclusion is `success` and `failed` for any other conclusion
-  (`failure`, `timed_out`, `startup_failure`, `cancelled`, ...), which is also recorded verbatim
-  in `ci_conclusion`.
-- Each event stores `ci_run_id`, `ci_run_url`, `ci_conclusion` and `ci_completed_at`.
-- Like PR correlation, this is an update of an existing job, so a `workflow_run` event never
-  creates one and redeliveries are no-ops.
-
-### Rerun policy
-
-The latest *completed* run wins: a completed event always overwrites the job's status and
-`ci_*` metadata, so a failed run followed by a successful rerun ends `succeeded`, and a later
-failed run moves a previously successful job back to `failed`. Because a redelivered completed
-event rewrites the same values, redeliveries are still no-ops.
-
-Only the `ci_running` transition is guarded (`AND status NOT IN ('succeeded', 'failed')`), so a
-queued or in-progress event — including the start of a rerun — never regresses a completed
-result; the job keeps the previous outcome until that rerun completes.
-
-### Upgrading existing remediation databases
-
-The `pr_*` and `ci_*` columns are added on startup with
-`ALTER TABLE ... ADD COLUMN` when missing, so an existing `remediation_jobs` database keeps
-working and its rows simply have no pull request recorded yet.
-
-### Upgrading from the idempotency-only schema
-
-On startup the store imports any rows from the previous `deliveries` table into
-`remediation_jobs` (`INSERT OR IGNORE`, so it is safe to re-run and never overwrites newer
-state), preserving delivery id, status, Devin session id/URL and timestamps. Already-dispatched
-deliveries therefore stay non-reclaimable across the upgrade, and previously failed ones stay
-retryable. Imported rows have no issue metadata in the old schema, so they get `repository`
-`unknown`, issue number `0` and empty title/URL. The `deliveries` table is left in place,
-unused, rather than dropped.
-
-## Idempotency
-
-Eligible deliveries are recorded in a SQLite table keyed by the `X-GitHub-Delivery` header, so a
-GitHub redelivery never creates a second Devin session:
-
-- The claim is an `INSERT` on that primary key, so exactly one concurrent duplicate wins; the
-  losers return `{"status": "in_progress"}` without calling Devin.
-- Once dispatched, redeliveries return `{"status": "duplicate"}` with the original session id and
-  URL.
-- A failed dispatch is marked `failed` and a later redelivery re-claims it, so failures stay
-  retryable rather than being suppressed.
-- State lives in `DELIVERY_DB_PATH`, so it survives restarts and is shared by processes pointing
-  at the same file. In Docker, mount a volume at `/data` to keep it.
-
-An eligible event without an `X-GitHub-Delivery` header is rejected with `400`.
-
-## Docker
-
-Build the image:
+**Build:**
 
 ```bash
 docker build -t devin-remediation-automation .
 ```
 
-Run it, supplying the secrets at runtime (no secrets are baked into the image):
+**Run** with a named volume so job state survives restarts:
 
 ```bash
 docker run --rm -p 8000:8000 \
@@ -230,38 +184,119 @@ docker run --rm -p 8000:8000 \
   devin-remediation-automation
 ```
 
-Check the health endpoint:
+**Health check:**
 
 ```bash
 curl http://localhost:8000/health
 # {"status":"healthy"}
 ```
 
-## Tests
+Interactive API docs: http://localhost:8000/docs.
+
+Without Docker:
 
 ```bash
-pytest
-```
-
-## Lint
-
-```bash
+python3.12 -m venv .venv && source .venv/bin/activate
+pip install -e ".[dev]"
+export GITHUB_WEBHOOK_SECRET=… DEVIN_API_KEY=… DEVIN_ORG_ID=…
+uvicorn devin_remediation_automation.main:app --reload --port 8000
+pytest        # mocked Devin API; never creates real sessions
 ruff check .
 ```
+
+## Simulating / evaluating locally
+
+There is no local webhook-simulation helper yet. The test suite (`tests/test_github_webhook.py`,
+`tests/test_pull_request_correlation.py`, `tests/test_ci_tracking.py`) drives the endpoint with
+signed synthetic `issues`, `pull_request`, and `workflow_run` payloads against a mocked Devin API,
+and is currently the fastest way to see each stage exercised.
+
+> TODO: a small script that signs and POSTs the three payload types at a running instance (with
+> Devin dispatch stubbed) would be a useful evaluator convenience.
+
+## Running a real E2E remediation
+
+1. Run the service and expose it on a public URL (for the demo, a Cloudflare quick tunnel; any
+   tunnel or deployed endpoint works).
+2. In the target repository, add a webhook pointing at `<public-url>/webhooks/github` with
+   content type `application/json`, the same secret as `GITHUB_WEBHOOK_SECRET`, and the events
+   **Issues**, **Pull requests**, and **Workflow runs**.
+3. Make sure the repository has a workflow named `Remediation validation` (the fork's runs the
+   repo's own `uv-pip-compile.sh` and fails on lock drift).
+4. Create or select an issue with clear acceptance criteria and add the `devin-remediation` label.
+5. Observe: the webhook response returns `dispatched` with a session URL; `GET /remediations`
+   shows the job move `dispatched → pr_created` when Devin's PR (with `Remediation-ID`) opens,
+   then `ci_running → succeeded|failed` as the workflow completes.
+
+## Safety / reliability properties
+
+- **HMAC verification** — every event (not just `issues`) must carry a valid
+  `X-Hub-Signature-256`; otherwise `401`.
+- **Repository allowlist** — only `ALLOWED_REPOSITORY` can dispatch or update jobs.
+- **Human approval label** — nothing happens until a person adds `devin-remediation`; other
+  label/issue activity is ignored without calling Devin.
+- **Idempotent delivery handling** — the claim is an `INSERT` on the `X-GitHub-Delivery` primary
+  key, so exactly one of concurrent duplicates wins; redeliveries return `duplicate`/`in_progress`
+  with the original session. A missing delivery header is rejected with `400`.
+- **Persistent job state** — SQLite at `DELIVERY_DB_PATH`; older schemas are migrated on startup
+  (`ALTER TABLE … ADD COLUMN`, and rows from the legacy `deliveries` table are imported with
+  `INSERT OR IGNORE`).
+- **PR correlation** — a `pull_request` event only *updates* an existing job matched by
+  `Remediation-ID`; unrelated PRs are ignored with `200`; a job keeps its first PR.
+- **Independent CI validation** — the verdict is the target repo's own workflow conclusion, not
+  Devin's self-report. Session-creation failures return `502` and are never reported as dispatched.
+- **Rerun semantics** — latest completed run wins; in-flight reruns never regress a final state;
+  a validation `failed` is terminal and is not re-dispatched.
+
+## Design decisions
+
+- **Label-triggered, not fully automatic.** A human decides which issues are safe to hand off;
+  the label is the audit trail of that decision, and it keeps the blast radius to opted-in issues.
+- **Devin for ambiguous remediation.** "Smallest safe fix" requires reading the repo, choosing
+  among options (constraint vs. extra, pin vs. upgrade), running repo tooling, and explaining the
+  choice. The three PRs above show exactly that reasoning; none of it is scriptable.
+- **Deterministic CI validates the agent.** The agent's claims are inputs to review, not proof.
+  The repository's own recompile check decides `succeeded`, so a plausible-but-wrong PR fails
+  loudly.
+- **SQLite.** One process, low volume, and the value is durability across restarts plus atomic
+  claims on a primary key — SQLite provides both with zero infrastructure for a take-home.
+- **Cloudflare quick tunnel is demo ingress only.** It gives GitHub a reachable URL during a demo;
+  nothing in the code depends on it, and it is not a production ingress design.
+
+## Production evolution / limitations
+
+- **Queue + background workers** — dispatch currently happens inline in the webhook request; a
+  queue would decouple GitHub's delivery timeout from Devin API latency and allow retries with
+  backoff.
+- **Durable database** — replace SQLite with Postgres for multi-replica deployments and proper
+  migrations.
+- **Secret manager** — env vars are fine for a container demo; production should pull from a
+  secret store and rotate.
+- **Stable ingress** — a deployed endpoint with TLS termination and IP allowlisting for GitHub's
+  webhook ranges instead of a tunnel.
+- **Concurrency / rate limits** — cap in-flight sessions per repo/org and respect Devin API limits.
+- **Session/cost tracking** — poll or subscribe to session status, record duration and ACU usage
+  per remediation, and expose it in `/remediations/metrics`.
+- **Richer CI/test-category routing** — `Remediation validation` currently covers only the
+  Python-dependency category (path-filtered recompile check). Code-quality and other categories
+  need their own jobs so every remediation type gets an independent verdict. The workflow also
+  does not install or run the resolved dependencies, so runtime breakage from a bump is not
+  detected.
+- **PR lifecycle beyond `opened`** — closed/merged PRs and follow-up commits are not tracked.
 
 ## Layout
 
 ```
 src/devin_remediation_automation/
-    main.py           # FastAPI app factory
-    config.py         # environment-backed settings
-    remediation_store.py # SQLite remediation job store (idempotency + lifecycle state)
-    dependencies.py   # FastAPI providers for the shared HTTP, Devin, and store clients
-    devin_client.py   # Devin v3 Organization API client
-    remediation.py    # builds the Devin task from the GitHub issue payload
-    security.py       # GitHub webhook signature verification
-    api/health.py     # GET /health
-    api/remediations.py # read-only remediation job + metrics endpoints
-    api/webhooks.py   # POST /webhooks/github
-tests/
+    main.py                 # FastAPI app factory
+    config.py               # environment-backed settings
+    security.py             # GitHub webhook HMAC verification
+    remediation.py          # task prompt, Remediation-ID marker, workflow-name constants
+    devin_client.py         # Devin v3 Organization API client
+    remediation_store.py    # SQLite job store: claims, correlation, CI outcomes, metrics
+    dependencies.py         # FastAPI providers for HTTP, Devin, and store clients
+    api/webhooks.py         # POST /webhooks/github (issues, pull_request, workflow_run)
+    api/remediations.py     # GET /remediations, /remediations/{id}, /remediations/metrics
+    api/health.py           # GET /health
+tests/                      # pytest; Devin API mocked
 ```
