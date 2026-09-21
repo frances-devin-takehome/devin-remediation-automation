@@ -15,26 +15,39 @@ dispatches a Devin session, correlates the PR Devin opens back to the originatin
 repository's own CI on that PR, and exposes the full lifecycle over a read-only API. The human's
 remaining job is code review and merge.
 
-**Why Devin is the core primitive.** The fix is not prescribed. Each issue is ambiguous in
-a way scripts cannot handle: "pin is vulnerable, find the smallest safe upgrade", "align a
-constraint with the lock", "address Ruff findings without changing behavior". Devin investigates
-the codebase, chooses the change, runs the repo's own tooling, and explains the root cause in the
-PR. The service around it is deliberately thin — it provides the approval gate, idempotency,
-state, and independent validation that make an autonomous engineer safe to run on a real repo.
+**Why Devin is the core primitive.** The orchestration is deterministic; the engineering path is
+not. A fixed script is the right tool when the remediation procedure is known in advance — Devin
+is useful exactly where the goal and acceptance criteria are structured but the
+repository-specific investigation and implementation vary. Across the five remediations below,
+that meant: tracing which generated dependency *input* actually drives a pinned output;
+reasoning about transitive graphs (`mcp`/`fastmcp-slim`, `nx` → `brace-expansion`) to find the
+smallest upgrade that moves the vulnerable node; applying broad lint findings without changing
+behavior; choosing a minimal frontend dependency bump over a disruptive one; and recognizing that
+Superset's naive-UTC database boundaries must be preserved while removing a deprecated datetime
+API. Devin investigates the codebase, chooses the change, runs the repo's own tooling, and
+explains the root cause in the PR. The service around it is deliberately thin — it provides the
+approval gate, idempotency, state, and independent validation that make an autonomous engineer
+safe to run on a real repo.
 
 ## Real remediation results
 
-Three real issues in the fork [`frances-devin-takehome/superset`](https://github.com/frances-devin-takehome/superset)
-were remediated by Devin through this pipeline. All PRs are intentionally left open for review.
+Five real issues in the fork [`frances-devin-takehome/superset`](https://github.com/frances-devin-takehome/superset)
+were remediated by Devin through this pipeline. All five PRs are intentionally left open — they
+are the evaluator-visible evidence, not merged work. (A sixth PR in the fork, [#8](https://github.com/frances-devin-takehome/superset/pull/8),
+is synthetic output from simulator/evaluation testing and is not one of the five.)
 
 | Issue | Category | PR | Outcome |
 | --- | --- | --- | --- |
 | [#1 xlrd constraint/lock mismatch](https://github.com/frances-devin-takehome/superset/issues/1) | Dependency lock drift | [PR #2](https://github.com/frances-devin-takehome/superset/pull/2) | Root cause found (`xlrd` bound lived only in an extra that is not a compile input); one-line constraint added to `requirements/base.in`, lock regenerated, `xlrd 2.0.1 → 2.0.2` only. Predates PR correlation and CI tracking, so no `Remediation-ID`/validation status was recorded. |
 | [#4 Ruff findings](https://github.com/frances-devin-takehome/superset/issues/4) | Code quality | [PR #5](https://github.com/frances-devin-takehome/superset/pull/5) | 39 `ruff check` findings under newer Ruff reduced to zero across the three tested Ruff versions (0.9.7, 0.12.0, 0.16.8) with behavior-preserving edits; formatter drift left out; `pre-commit` and the `superset-extensions-cli` test suite passed. Predates correlation/CI tracking; the current `Remediation validation` workflow does not yet cover this category. |
-| [#6 vulnerable python-multipart pin](https://github.com/frances-devin-takehome/superset/issues/6) | Security dependency | [PR #7](https://github.com/frances-devin-takehome/superset/pull/7) | Transitive pin (via `mcp`/`fastmcp-slim`) bumped `0.0.29 → 0.0.32`, fixing four advisories (CVE-2026-53537..53540); scoped `--upgrade-package` recompile, one line changed. Carries `Remediation-ID`; [`Remediation validation` passed](https://github.com/frances-devin-takehome/superset/actions/runs/35534835834), and the service recorded the job as `succeeded` (see the example under Observability). |
+| [#6 vulnerable python-multipart pin](https://github.com/frances-devin-takehome/superset/issues/6) | Python dependency security | [PR #7](https://github.com/frances-devin-takehome/superset/pull/7) | **Primary end-to-end example.** Devin traced the vulnerable transitive pin through `mcp`/`fastmcp-slim`, chose a scoped `--upgrade-package` upgrade, and regenerated the dependency output — one line, `0.0.29 → 0.0.32`, fixing four advisories (CVE-2026-53537..53540). Complete lifecycle: issue label → Devin dispatch → `Remediation-ID` PR correlation → [deterministic `Remediation validation` run](https://github.com/frances-devin-takehome/superset/actions/runs/35534835834) → `succeeded` (see the example under Observability). |
+| [#9 vulnerable frontend transitive chain](https://github.com/frances-devin-takehome/superset/issues/9) | Frontend/transitive dependency security | [PR #10](https://github.com/frances-devin-takehome/superset/pull/10) | Dependency-graph reasoning, not a package bump: `brace-expansion` (GHSA-rgw5-rvv9-x895) is pinned *exactly* by `nx`, so it cannot move on its own. Devin followed the chain `lerna → nx → brace-expansion` and took the minimal fix — `nx 23.1.1 → 23.1.2` (already inside `lerna`'s declared range), moving nested `brace-expansion 5.0.8 → 5.0.9` and updating the platform-specific Nx lockfile entries coherently. Correlated to `pr_created`; the validation workflow is path-filtered to Python dependencies, so it does not cover this category. |
+| [#11 deprecated `datetime.utcnow()` usage](https://github.com/frances-devin-takehome/superset/issues/11) | Code modernization | [PR #12](https://github.com/frances-devin-takehome/superset/pull/12) | Not a mechanical swap to timezone-aware datetimes: Devin found that Superset has code paths and database boundaries that intentionally require *naive* UTC values, so replacing the deprecated calls with aware ones would change comparison semantics. It instead routed the 114 remaining call sites through Superset's existing `naive_utcnow()` helper — deprecated API removed, behavior preserved. Correlated to `pr_created`; not covered by the current validation workflow. |
 
-Only the third issue exercised the complete lifecycle end to end; the first two were dispatched by earlier
-revisions of the service, before the PR-correlation and CI-tracking stages existed.
+Only the `python-multipart` remediation exercised the complete lifecycle through independent
+validation. The first two were dispatched by earlier revisions of the service, before the
+PR-correlation and CI-tracking stages existed; the last two are correlated but fall outside the
+validation workflow's path filter (see *Validation coverage* below).
 
 ## What the system does
 
@@ -68,6 +81,7 @@ flowchart TD
     PR --> CI[Remediation validation<br/>GitHub Actions workflow]
     CI -->|workflow_run webhook| Svc
     DB --> API[GET /remediations<br/>GET /remediations/metrics]
+    Devin -->|v3 session metrics API| Analytics[GET /devin/analytics<br/>org-wide Devin utilization]
     Svc -.->|ci_running → succeeded / failed| DB
 
     classDef gate fill:#fff3cd,stroke:#b8860b,stroke-width:2px;
@@ -102,6 +116,14 @@ Rerun semantics: the latest *completed* workflow run wins, so a failed run follo
 successful rerun ends `succeeded`, and vice versa. A queued/in-progress event never regresses a
 completed result (`ci_running` is only applied when the job is not already `succeeded`/`failed`).
 
+### Validation coverage
+
+`Remediation validation` is path-filtered to the Python-dependency category (`pyproject.toml`,
+`requirements/**`, `scripts/uv-pip-compile.sh`), so of the five real remediations it independently
+covers one: the `python-multipart` fix. The frontend-lockfile, code-quality, and code-modernization
+remediations rely on Devin's own targeted validation plus human review in this prototype — that is
+a coverage limitation of the prototype workflow, not a claim about those PRs' correctness.
+
 ## Observability
 
 | Endpoint | Purpose |
@@ -112,13 +134,15 @@ completed result (`ci_running` is only applied when the job is not already `succ
 | `GET /devin/analytics` | Devin platform session utilization (v3 metrics API passthrough) |
 | `GET /health` | liveness |
 
-Two distinct views, deliberately not merged:
+The service uses two Devin APIs: the **Session API** to dispatch remediations, and the
+**organization session Metrics/Analytics API** behind `GET /devin/analytics`. Their outputs are
+two distinct views, deliberately not merged:
 
 - `/remediations/metrics` — **application-level workflow effectiveness**: how this service's own
   remediation jobs progressed, from persisted SQLite state.
-- `/devin/analytics` — **Devin platform/session utilization and consumption**: organization-wide
-  session counts and ACU usage read live from the Devin API, covering all Devin usage, not just
-  remediation jobs.
+- `/devin/analytics` — **organization-wide Devin platform/session utilization**: session counts
+  and ACU consumption read live from the Devin API, covering *all* Devin usage in the window, not
+  just remediation jobs.
 
 A real successful remediation (`GET /remediations/{delivery_id}` for issue #6 / PR #7):
 
@@ -181,16 +205,24 @@ The window defaults to the last 7 days. `time_after`/`time_before` are Unix time
 (UTC), as documented for the v3 metrics/audit time filters, and can be overridden per request:
 `GET /devin/analytics?time_after=1758200000&time_before=1758800000`.
 
+A real response for the current seven-day window (abridged; the endpoint also returns the
+resolved `window` object and `sessions_created_by_size`):
+
 ```json
 {
-  "window": { "time_after": 1758196800, "time_before": 1758801600, "days": 7.0 },
-  "sessions_created": 12,
-  "avg_acus_per_session": 3.5,
-  "sessions_with_merged_prs": 7,
-  "sessions_created_by_origin": { "api": 9, "webapp": 3 },
-  "sessions_created_by_size": { "s": 4, "m": 8 }
+  "sessions_created": 9,
+  "avg_acus_per_session": 0.0,
+  "sessions_with_merged_prs": 3,
+  "sessions_created_by_origin": { "webapp": 3, "api": 6 }
 }
 ```
+
+Devin's Analytics API provides organization-level utilization data, while `/remediations/metrics`
+provides application-level workflow effectiveness. In the current seven-day window, 6 of 9 Devin
+sessions were created programmatically through the API; the other 3 were created manually in the
+web app. These counts are organization-wide for the selected window and are **not** remediation
+success counts — `sessions_with_merged_prs` covers any Devin session, and the five remediation
+PRs above are deliberately unmerged.
 
 This endpoint is read-only and off the webhook path: a Devin API outage degrades it to `502`
 without affecting issue dispatch, PR correlation, or CI tracking.
@@ -331,7 +363,7 @@ the reference for expected behavior.
   the label is the audit trail of that decision, and it keeps the blast radius to opted-in issues.
 - **Devin for ambiguous remediation.** "Smallest safe fix" requires reading the repo, choosing
   among options (constraint vs. extra, pin vs. upgrade), running repo tooling, and explaining the
-  choice. The three PRs above required repository-specific investigation and judgment that a
+  choice. The five PRs above required repository-specific investigation and judgment that a
   fixed remediation script would not reliably capture.
 - **Deterministic CI validates the agent.** The agent's claims are inputs to review, not proof.
   The repository's own recompile check decides `succeeded`, so a plausible-but-wrong PR fails
