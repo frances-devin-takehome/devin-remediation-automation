@@ -109,7 +109,16 @@ completed result (`ci_running` is only applied when the job is not already `succ
 | `GET /remediations` | newest-first list; `?status=<lifecycle status>`, `?limit=` (1–200, default 50), `?offset=` |
 | `GET /remediations/{delivery_id}` | one job, `404` if unknown |
 | `GET /remediations/metrics` | aggregate counts and operational timestamps |
+| `GET /devin/analytics` | Devin platform session utilization (v3 metrics API passthrough) |
 | `GET /health` | liveness |
+
+Two distinct views, deliberately not merged:
+
+- `/remediations/metrics` — **application-level workflow effectiveness**: how this service's own
+  remediation jobs progressed, from persisted SQLite state.
+- `/devin/analytics` — **Devin platform/session utilization and consumption**: organization-wide
+  session counts and ACU usage read live from the Devin API, covering all Devin usage, not just
+  remediation jobs.
 
 A real successful remediation (`GET /remediations/{delivery_id}` for issue #6 / PR #7):
 
@@ -161,10 +170,36 @@ Metrics shape:
   failed ones, so it can exceed `total`.
 - `oldest_in_progress_at` surfaces work stuck mid-dispatch.
 
+### Devin platform analytics
+
+`GET /devin/analytics` proxies [`GET /v3/organizations/{org_id}/metrics/sessions`](https://docs.devin.ai/api-reference/v3/metrics/organizations-metrics-sessions)
+using the same `DEVIN_API_KEY` / `DEVIN_ORG_ID` / `DEVIN_API_BASE_URL` configuration as session
+dispatch. The service user needs the `ViewOrgMetrics` organization permission in addition to
+`ManageOrgSessions`; without it the Devin API returns `403` and this endpoint returns `502`.
+
+The window defaults to the last 7 days. `time_after`/`time_before` are Unix timestamps in seconds
+(UTC), as documented for the v3 metrics/audit time filters, and can be overridden per request:
+`GET /devin/analytics?time_after=1758200000&time_before=1758800000`.
+
+```json
+{
+  "window": { "time_after": 1758196800, "time_before": 1758801600, "days": 7.0 },
+  "sessions_created": 12,
+  "avg_acus_per_session": 3.5,
+  "sessions_with_merged_prs": 7,
+  "sessions_created_by_origin": { "api": 9, "webapp": 3 },
+  "sessions_created_by_size": { "s": 4, "m": 8 }
+}
+```
+
+This endpoint is read-only and off the webhook path: a Devin API outage degrades it to `502`
+without affecting issue dispatch, PR correlation, or CI tracking.
+
 ## Running locally
 
 **Prerequisites:** Docker (or Python 3.12 for a non-container run), a GitHub webhook secret, and
-a Devin service-user API key with `ManageOrgSessions` plus the Devin organization id.
+a Devin service-user API key with `ManageOrgSessions` (plus `ViewOrgMetrics` for
+`GET /devin/analytics`) and the Devin organization id.
 
 **Environment variables** (see `.env.example`; secrets are read from the environment only and are
 never baked into the image):
@@ -335,11 +370,12 @@ src/devin_remediation_automation/
     config.py               # environment-backed settings
     security.py             # GitHub webhook HMAC verification
     remediation.py          # task prompt, Remediation-ID marker, workflow-name constants
-    devin_client.py         # Devin v3 Organization API client
+    devin_client.py         # Devin v3 Organization API client (sessions + session metrics)
     remediation_store.py    # SQLite job store: claims, correlation, CI outcomes, metrics
     dependencies.py         # FastAPI providers for HTTP, Devin, and store clients
     api/webhooks.py         # POST /webhooks/github (issues, pull_request, workflow_run)
     api/remediations.py     # GET /remediations, /remediations/{id}, /remediations/metrics
+    api/analytics.py        # GET /devin/analytics
     api/health.py           # GET /health
 tests/                      # pytest; Devin API mocked
 scripts/simulate_webhook.py # signed synthetic webhook sender for local evaluation
