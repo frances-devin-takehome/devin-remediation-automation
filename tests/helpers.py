@@ -9,20 +9,38 @@ from fastapi import FastAPI
 
 from devin_remediation_automation.config import Settings, get_settings
 from devin_remediation_automation.dependencies import get_devin_client
-from devin_remediation_automation.devin_client import DevinSession
+from devin_remediation_automation.devin_client import DevinSession, DevinSessionMetrics
 from devin_remediation_automation.main import create_app
 
 SECRET = "test-secret"
 ALLOWED_REPOSITORY = "frances-devin-takehome/superset"
 
 
+FAKE_SESSION_METRICS = DevinSessionMetrics(
+    sessions_created_count=12,
+    avg_acus_per_session=3.5,
+    sessions_with_merged_prs_count=7,
+    sessions_created_by_origin={"api": 9, "webapp": 3},
+    sessions_created_by_size={"s": 4, "m": 8},
+)
+
+
 class FakeDevinClient:
     """Stand-in for DevinClient; records calls instead of reaching the Devin API."""
 
-    def __init__(self, error: Exception | None = None, delay: float = 0.0) -> None:
+    def __init__(
+        self,
+        error: Exception | None = None,
+        delay: float = 0.0,
+        metrics: DevinSessionMetrics | None = None,
+        metrics_error: Exception | None = None,
+    ) -> None:
         self.error = error
         self.delay = delay
+        self.metrics = metrics or FAKE_SESSION_METRICS
+        self.metrics_error = metrics_error
         self.calls: list[dict[str, Any]] = []
+        self.metrics_calls: list[dict[str, int]] = []
         self._ids = itertools.count(1)
 
     async def create_session(
@@ -42,6 +60,14 @@ class FakeDevinClient:
             session_id=f"devin-abc{suffix}",
             url=f"https://app.devin.ai/sessions/abc{suffix}",
         )
+
+    async def get_session_metrics(
+        self, *, time_after: int, time_before: int
+    ) -> DevinSessionMetrics:
+        self.metrics_calls.append({"time_after": time_after, "time_before": time_before})
+        if self.metrics_error is not None:
+            raise self.metrics_error
+        return self.metrics
 
 
 def build_app(devin_client: FakeDevinClient, delivery_db_path: str) -> FastAPI:
